@@ -63,7 +63,7 @@ export default function Queue() {
                   onClick={() => setSelectedOffice(office)}
                   className={`flex-1 lg:flex-initial px-3 sm:px-5 py-2 sm:py-2.5 text-xs font-bold rounded-xl transition-all duration-300 transform active:scale-95 cursor-pointer whitespace-nowrap ${
                     isSelected
-                      ? 'bg-white text-purple-700 shadow-md border-2 border-purple-600 ring-4 ring-purple-100 scale-102'
+                      ? 'bg-white text-blue-700 shadow-md border-2 border-blue-500 ring-4 ring-purple-100 scale-102'
                       : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 border-2 border-transparent'
                   }`}
                 >
