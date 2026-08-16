@@ -12,13 +12,13 @@ import {
   Menu,
   AlertCircle
 } from 'lucide-react';
-import Dashboard from './pages/Dashboard';
+import Dashboard from './pages/dashboard';
 import QueueControl from './pages/queue.jsx';
-import Appointments from './pages/Appointments';
-import Offices from './pages/Offices';
-import MobileUsers from './pages/Users';
+import Appointments from './pages/appointments';
+import Offices from './pages/offices';
+import MobileUsers from './pages/users';
 import Profile from './pages/profile.jsx';
-import Login from './pages/Login';
+import Login from './pages/login';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
