@@ -12,7 +12,8 @@ import {
   Menu,
   AlertCircle,
   X,
-  MessageSquareText
+  MessageSquareText,
+  Star
 } from 'lucide-react';
 import Dashboard from './pages/dashboard';
 import QueueControl from './pages/queue.jsx';
@@ -21,6 +22,7 @@ import Offices from './pages/offices';
 import MobileUsers from './pages/users';
 import Profile from './pages/profile.jsx';
 import Feedback from './pages/feedback'; // Added Feedback page import
+import Ratings from './pages/ratings'; // Added Ratings page import
 import Login from './pages/login';
 
 export default function App() {
@@ -86,6 +88,8 @@ export default function App() {
         return <MobileUsers />;
       case 'feedback':
         return <Feedback />; // Added Feedback case
+      case 'ratings':
+        return <Ratings />; // Added Ratings case
       case 'profile':
         return <Profile />;
       default:
@@ -100,6 +104,7 @@ export default function App() {
     { id: 'offices', label: 'Offices', icon: Building2 },
     { id: 'users', label: 'Users', icon: Users },
     { id: 'feedback', label: 'Feedback', icon: MessageSquareText }, // Added Feedback nav item
+    { id: 'ratings', label: 'Ratings', icon: Star }, // Added Ratings nav item
     { id: 'profile', label: 'Profile', icon: User },
   ];
 
@@ -157,6 +162,9 @@ export default function App() {
         }
         .animate-slide-left-8 {
           animation: slideInLeftToRight 3s cubic-bezier(0.16, 1, 0.3, 1) 0.54s both;
+        }
+        .animate-slide-left-9 {
+          animation: slideInLeftToRight 3s cubic-bezier(0.16, 1, 0.3, 1) 0.61s both;
         }
       `}</style>
 
@@ -239,7 +247,7 @@ export default function App() {
 
           {/* Footer Logout Button */}
           <div 
-            className={`animate-slide-left-8 p-3 border-t border-sky-200/60 transition-all duration-500 ease-out transform shrink-0 ${
+            className={`animate-slide-left-9 p-3 border-t border-sky-200/60 transition-all duration-500 ease-out transform shrink-0 ${
               sidebarOpen ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-90'
             }`}
           >

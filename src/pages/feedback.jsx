@@ -14,7 +14,7 @@ function Feedback() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Inject keyframe animation for the 2-second fade-in effect
+    // Inject keyframe animation for the 1-second fade-in effect
     const styleSheet = document.createElement("style");
     styleSheet.type = "text/css";
     styleSheet.innerText = `
@@ -75,7 +75,7 @@ function Feedback() {
   };
 
   return (
-    <div className="w-full min-h-screen bg-slate-50 p-[clamp(15px,3vw,30px)] box-border font-['Segoe_UI',Tahoma,Geneva,Verdana,sans-serif] animate-[fadeInSmooth_2s_ease-in-out]">
+    <div className="w-full min-h-screen bg-slate-50 p-[clamp(15px,3vw,30px)] box-border font-['Segoe_UI',Tahoma,Geneva,Verdana,sans-serif] animate-[fadeInSmooth_1s_ease-in-out]">
       <div className="mb-6">
         <h1 className="text-[clamp(22px,2.5vw,28px)] font-bold text-slate-900 mb-1.5">User Feedback Dashboard</h1>
         <p className="text-[clamp(13px,1.5vw,15px)] text-slate-500 m-0">Review what users are saying about the application.</p>
