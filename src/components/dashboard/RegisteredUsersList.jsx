@@ -2,31 +2,31 @@ import { Users } from 'lucide-react';
 
 export default function RegisteredUsersList({ registeredUsers }) {
   return (
-    <div className="bg-white p-6 rounded-2xl shadow-xs border border-sky-100 flex flex-col justify-between transition-all duration-300 hover:shadow-md">
+    <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-xs border border-sky-100 flex flex-col justify-between transition-all duration-300 hover:shadow-md">
       <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-            <Users className="w-5 h-5 text-indigo-600" />
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+          <h2 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
+            <Users className="w-5 h-5 text-indigo-600 shrink-0" />
             Registered System Users
           </h2>
-          <span className="text-xs font-semibold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-lg border border-indigo-100">
+          <span className="self-start sm:self-auto text-xs font-semibold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-lg border border-indigo-100">
             {registeredUsers.length} Users
           </span>
         </div>
 
-        <div className="space-y-3 mt-4">
+        <div className="space-y-3 mt-4 max-h-[380px] overflow-y-auto pr-1">
           {registeredUsers.map((u) => (
-            <div key={u.uid} className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-100 transition-all hover:bg-sky-50/50 hover:border-sky-200">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs">
+            <div key={u.uid} className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100 transition-all hover:bg-sky-50/50 hover:border-sky-200">
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs shrink-0">
                   {u.name.charAt(0)}
                 </div>
-                <div>
-                  <p className="text-xs font-bold text-slate-800">{u.name}</p>
-                  <p className="text-[11px] text-slate-500 truncate max-w-[140px]">{u.email}</p>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-bold text-slate-800 truncate">{u.name}</p>
+                  <p className="text-[11px] text-slate-500 truncate max-w-[150px] sm:max-w-xs md:max-w-sm">{u.email}</p>
                 </div>
               </div>
-              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-600">
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-600 shrink-0">
                 {u.role}
               </span>
             </div>

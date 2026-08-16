@@ -99,27 +99,29 @@ export default function Swds({
   })();
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <div className="flex flex-col gap-6">
-        <div className="bg-white p-6 rounded-2xl shadow-xs border border-slate-200 text-center flex flex-col items-center justify-between">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 w-full">
+      {/* Left Column: Now Serving & Priority Lineup */}
+      <div className="flex flex-col gap-4 sm:gap-6">
+        {/* Now Serving Card */}
+        <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-xs border border-slate-200 text-center flex flex-col items-center justify-between">
           <div className="w-full">
             <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 block">
               Now Serving ({officeName})
             </span>
             {currentServing ? (
               <div className="flex flex-col items-center">
-                <span className="text-5xl font-black text-purple-600 my-2 font-mono">
+                <span className="text-4xl sm:text-5xl font-black text-purple-600 my-2 font-mono break-all">
                   {currentServing.queueNumber || 'N/A'}
                 </span>
-                <p className="font-semibold text-slate-800 text-lg mt-1">
+                <p className="font-semibold text-slate-800 text-base sm:text-lg mt-1 px-2 break-words">
                   {currentServing.userName || 'Unknown Student'}
                 </p>
-                <span className="inline-block px-2.5 py-0.5 rounded-md text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-100 my-1">
+                <span className="inline-block px-2.5 py-0.5 rounded-md text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-100 my-1 max-w-full truncate">
                   {currentServing.office} -{' '}
                   {currentServing.service || currentServing.reason}
                 </span>
                 {currentServing.isPriority && (
-                  <div className="mt-3 mb-1">
+                  <div className="mt-3 mb-1 flex flex-col items-center">
                     <span className="inline-block px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200 mb-2">
                       Priority Lane Active
                     </span>
@@ -131,7 +133,7 @@ export default function Swds({
                           }
                           className="inline-flex items-center gap-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg transition-colors border border-slate-300"
                         >
-                          <Eye className="w-3.5 h-3.5" />
+                          <Eye className="w-3.5 h-3.5 shrink-0" />
                           View ID Image
                         </button>
                       </div>
@@ -140,9 +142,9 @@ export default function Swds({
                 )}
               </div>
             ) : (
-              <div className="py-12">
-                <Users className="w-12 h-12 text-slate-300 mx-auto mb-2" />
-                <p className="text-slate-500 text-sm font-medium">
+              <div className="py-8 sm:py-12">
+                <Users className="w-10 h-10 sm:w-12 sm:h-12 text-slate-300 mx-auto mb-2" />
+                <p className="text-slate-500 text-sm font-medium px-2">
                   No active ticket being served for {officeName}.
                 </p>
               </div>
@@ -152,61 +154,62 @@ export default function Swds({
             <div className="flex items-center gap-2 mt-6 w-full justify-center">
               <button
                 onClick={() => completeAppointment(currentServing.id)}
-                className="w-full inline-flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-4 rounded-xl transition-colors shadow-xs text-xs"
+                className="w-full inline-flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-4 rounded-xl transition-colors shadow-xs text-xs sm:text-sm"
               >
-                <CheckCheck className="w-4 h-4" />
+                <CheckCheck className="w-4 h-4 shrink-0" />
                 Complete
               </button>
             </div>
           )}
         </div>
 
-        <div className="bg-white p-6 rounded-2xl shadow-xs border border-amber-200/60 flex flex-col justify-between">
+        {/* Priority Lineup Card */}
+        <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-xs border border-amber-200/60 flex flex-col justify-between">
           <div>
-            <h2 className="text-lg font-bold text-slate-900 mb-1 flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <ShieldAlert className="w-5 h-5 text-amber-600" />
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-1">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0" />
                 Priority Lineup ({officeName})
-              </span>
-              <span className="text-xs font-semibold bg-amber-50 text-amber-700 px-2 py-1 rounded-lg border border-amber-200">
+              </h2>
+              <span className="self-start sm:self-auto text-xs font-semibold bg-amber-50 text-amber-700 px-2 py-1 rounded-lg border border-amber-200">
                 {priorityLaneQueue.length} Pending
               </span>
-            </h2>
+            </div>
             <p className="text-xs text-slate-500 mb-4">
               Bookings remain here until reviewed and approved.
             </p>
             {priorityLaneQueue.length === 0 ? (
-              <div className="py-12 text-center">
-                <p className="text-slate-500 text-sm font-medium">
+              <div className="py-8 sm:py-12 text-center">
+                <p className="text-slate-500 text-sm font-medium px-2">
                   No pending priority bookings for {officeName}.
                 </p>
               </div>
             ) : (
-              <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1">
+              <div className="space-y-3 max-h-[350px] sm:max-h-[380px] overflow-y-auto pr-1">
                 {priorityLaneQueue.map((item) => (
                   <div
                     key={item.id}
-                    className="flex flex-col p-3.5 bg-amber-50/40 rounded-xl border border-amber-200/70 hover:bg-amber-50 transition-colors gap-2"
+                    className="flex flex-col p-3 sm:p-3.5 bg-amber-50/40 rounded-xl border border-amber-200/70 hover:bg-amber-50 transition-colors gap-2.5"
                   >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className="font-mono font-bold text-slate-900 bg-white px-2.5 py-1 rounded-md border border-slate-200 text-xs shadow-2xs">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span className="font-mono font-bold text-slate-900 bg-white px-2.5 py-1 rounded-md border border-slate-200 text-xs shadow-2xs shrink-0">
                           {item.queueNumber || 'N/A'}
                         </span>
-                        <div>
-                          <p className="font-semibold text-slate-900 text-sm">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-900 text-sm truncate">
                             {item.userName || 'Unknown Student'}
                           </p>
-                          <p className="text-xs text-slate-500">{item.office}</p>
+                          <p className="text-xs text-slate-500 truncate">{item.office}</p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
                         <button
                           onClick={() => approveAppointment(item.id)}
                           className="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-800 font-semibold text-xs bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition-colors shadow-2xs"
                           title="Approve and move to waiting queue"
                         >
-                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                           Approve
                         </button>
                         <button
@@ -214,11 +217,12 @@ export default function Swds({
                           className="inline-flex items-center gap-1 text-rose-700 hover:text-rose-800 font-semibold text-xs bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 rounded-lg border border-rose-200 transition-colors"
                           title="Reject"
                         >
-                          <XCircle className="w-3.5 h-3.5" />
+                          <XCircle className="w-3.5 h-3.5 shrink-0" />
+                          Reject
                         </button>
                       </div>
                     </div>
-                    <div className="flex items-center justify-between pt-2 border-t border-amber-200/50 mt-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-amber-200/50 mt-1">
                       <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800">
                         Awaiting Approval
                       </span>
@@ -227,7 +231,7 @@ export default function Swds({
                           onClick={() => setSelectedImage(item.priorityImageUrl)}
                           className="inline-flex items-center gap-1 text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-300 shadow-2xs transition-colors"
                         >
-                          <Eye className="w-3 h-3" />
+                          <Eye className="w-3 h-3 shrink-0" />
                           View ID Image
                         </button>
                       )}
@@ -240,51 +244,55 @@ export default function Swds({
         </div>
       </div>
 
-      <div className="bg-white p-6 rounded-2xl shadow-xs border border-slate-200 flex flex-col justify-between h-full">
+      {/* Right Column: Upcoming Queue */}
+      <div className="bg-white p-4 sm:p-6 rounded-2xl shadow-xs border border-slate-200 flex flex-col justify-between h-full">
         <div>
-          <h2 className="text-lg font-bold text-slate-900 mb-4 flex items-center justify-between">
-            <span>Upcoming Queue ({officeName})</span>
-            <span className="text-xs font-semibold bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+            <h2 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
+              Upcoming Queue ({officeName})
+            </h2>
+            <span className="self-start sm:self-auto text-xs font-semibold bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">
               {upcomingQueue.length} Waiting
             </span>
-          </h2>
+          </div>
           {upcomingQueue.length === 0 ? (
-            <div className="py-12 text-center">
-              <p className="text-slate-500 text-sm font-medium">
+            <div className="py-8 sm:py-12 text-center">
+              <p className="text-slate-500 text-sm font-medium px-2">
                 No items in the upcoming queue for {officeName}.
               </p>
             </div>
           ) : (
-            <div className="space-y-3 max-h-[820px] overflow-y-auto pr-1">
+            <div className="space-y-3 max-h-[450px] lg:max-h-[820px] overflow-y-auto pr-1">
               {upcomingQueue.map((item) => (
                 <div
                   key={item.id}
-                  className="flex flex-col p-3.5 bg-slate-50 rounded-xl border border-slate-200 hover:bg-slate-100/50 transition-colors gap-2"
+                  className="flex flex-col p-3 sm:p-3.5 bg-slate-50 rounded-xl border border-slate-200 hover:bg-slate-100/50 transition-colors gap-2.5"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <span className="font-mono font-bold text-slate-900 bg-white px-2.5 py-1 rounded-md border border-slate-200 text-xs shadow-2xs">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="font-mono font-bold text-slate-900 bg-white px-2.5 py-1 rounded-md border border-slate-200 text-xs shadow-2xs shrink-0">
                         {item.queueNumber || 'N/A'}
                       </span>
-                      <div>
-                        <p className="font-semibold text-slate-900 text-sm">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-slate-900 text-sm truncate">
                           {item.userName || 'Unknown Student'}
                         </p>
-                        <p className="text-xs text-slate-500">{item.office}</p>
+                        <p className="text-xs text-slate-500 truncate">{item.office}</p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
                       <button
                         onClick={() => rejectAppointment(item.id)}
                         className="inline-flex items-center gap-1 text-rose-700 hover:text-rose-800 font-semibold text-xs bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 rounded-lg border border-rose-200 transition-colors"
                         title="Reject"
                       >
-                        <XCircle className="w-3.5 h-3.5" />
+                        <XCircle className="w-3.5 h-3.5 shrink-0" />
+                        Reject
                       </button>
                     </div>
                   </div>
                   {item.isPriority && (
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-200/60 mt-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/60 mt-1">
                       <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
                         Priority Lane (Approved)
                       </span>
@@ -293,7 +301,7 @@ export default function Swds({
                           onClick={() => setSelectedImage(item.priorityImageUrl)}
                           className="inline-flex items-center gap-1 text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-300 shadow-2xs transition-colors"
                         >
-                          <Eye className="w-3 h-3" />
+                          <Eye className="w-3 h-3 shrink-0" />
                           View ID
                         </button>
                       )}
