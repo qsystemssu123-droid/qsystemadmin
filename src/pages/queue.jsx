@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { useAppointments } from '../hooks/useAppointments';
 import { X } from 'lucide-react';
-import Clinic from '../components/clinic';
-import Osas from '../components/osas';
-import Swds from '../components/swds';
+import Clinic from '../components/queue/clinic';
+import Osas from '../components/queue/osas';
+import Swds from '../components/queue/swds';
 
 export default function Queue() {
   const {
@@ -31,7 +31,17 @@ export default function Queue() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-5">
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        .animate-fade-in-slow {
+          animation: fadeIn 1s ease-in-out;
+        }
+      `}</style>
+
+      <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-5 animate-fade-in-slow">
         <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-slate-900">
@@ -65,39 +75,41 @@ export default function Queue() {
         </div>
       </div>
 
-      {/* Conditional rendering of individual office components */}
-      {selectedOffice === 'Clinic' && (
-        <Clinic
-          appointments={appointments}
-          approveAppointment={approveAppointment}
-          rejectAppointment={rejectAppointment}
-          completeAppointment={completeAppointment}
-          setSelectedImage={setSelectedImage}
-        />
-      )}
+      {/* Conditional rendering of individual office components with 2-second fade-in animation */}
+      <div key={selectedOffice} className="animate-fade-in-slow">
+        {selectedOffice === 'Clinic' && (
+          <Clinic
+            appointments={appointments}
+            approveAppointment={approveAppointment}
+            rejectAppointment={rejectAppointment}
+            completeAppointment={completeAppointment}
+            setSelectedImage={setSelectedImage}
+          />
+        )}
 
-      {selectedOffice === 'OSAS' && (
-        <Osas
-          appointments={appointments}
-          approveAppointment={approveAppointment}
-          rejectAppointment={rejectAppointment}
-          completeAppointment={completeAppointment}
-          setSelectedImage={setSelectedImage}
-        />
-      )}
+        {selectedOffice === 'OSAS' && (
+          <Osas
+            appointments={appointments}
+            approveAppointment={approveAppointment}
+            rejectAppointment={rejectAppointment}
+            completeAppointment={completeAppointment}
+            setSelectedImage={setSelectedImage}
+          />
+        )}
 
-      {selectedOffice === 'SWDS' && (
-        <Swds
-          appointments={appointments}
-          approveAppointment={approveAppointment}
-          rejectAppointment={rejectAppointment}
-          completeAppointment={completeAppointment}
-          setSelectedImage={setSelectedImage}
-        />
-      )}
+        {selectedOffice === 'SWDS' && (
+          <Swds
+            appointments={appointments}
+            approveAppointment={approveAppointment}
+            rejectAppointment={rejectAppointment}
+            completeAppointment={completeAppointment}
+            setSelectedImage={setSelectedImage}
+          />
+        )}
+      </div>
 
       {selectedImage && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs animate-fade-in-slow">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 relative shadow-xl border border-slate-200 flex flex-col items-center">
             <div className="flex items-center justify-between w-full mb-4">
               <h3 className="text-base font-bold text-slate-900">

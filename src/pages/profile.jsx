@@ -20,7 +20,14 @@ export default function AdminProfile() {
   const creationTime = adminUser?.metadata?.creationTime ? new Date(adminUser.metadata.creationTime).toLocaleDateString() : 'Active Session';
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
+    <div className="space-y-6 max-w-5xl mx-auto" style={{ animation: 'fadeIn 2s ease-in-out' }}>
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+      `}</style>
+
       {/* Page Header */}
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">Administrator Profile & Security</h1>
