@@ -64,20 +64,20 @@ export default function Login({ onLogin }) {
   };
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-gradient-to-br from-slate-900 via-purple-950 to-slate-900 px-4 relative overflow-hidden font-sans">
+    <div className="flex min-h-screen w-screen items-center justify-center bg-gradient-to-br from-blue-950 via-blue-900 to-slate-900 px-4 py-8 relative overflow-hidden font-sans box-border">
       {/* Background Decorative Glows */}
-      <div className="absolute -top-40 -left-40 w-96 h-96 bg-purple-600/20 rounded-full blur-3xl pointer-events-none"></div>
-      <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-indigo-600/20 rounded-full blur-3xl pointer-events-none"></div>
+      <div className="absolute -top-40 -left-40 w-96 h-96 bg-blue-500/20 rounded-full blur-3xl pointer-events-none"></div>
+      <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-indigo-500/20 rounded-full blur-3xl pointer-events-none"></div>
 
-      <div className="w-full max-w-md bg-white/95 backdrop-blur-xl p-8 sm:p-10 rounded-3xl shadow-2xl border border-white/20 space-y-8 text-center relative z-10 transition-all">
+      <div className="w-full max-w-md bg-white/95 backdrop-blur-xl p-8 sm:p-10 rounded-3xl shadow-2xl border border-white/20 space-y-8 text-center relative z-10 transition-all box-border">
         
         {/* Branding Logo & University Tag */}
         <div className="space-y-3">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-purple-700 text-white shadow-lg shadow-purple-700/30 mb-1">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-600/30 mb-1">
             <Building2 className="w-8 h-8" />
           </div>
           <div>
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-purple-50 border border-purple-200 text-purple-700 text-xs font-bold uppercase tracking-wider mb-2">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-700 text-xs font-bold uppercase tracking-wider mb-2">
               <Sparkles className="w-3.5 h-3.5" /> Samar State University
             </div>
             <h1 className="text-3xl font-black text-slate-900 tracking-tight">QueueMatrix</h1>
