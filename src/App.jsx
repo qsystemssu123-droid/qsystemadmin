@@ -11,7 +11,8 @@ import {
   LogOut, 
   Menu,
   AlertCircle,
-  X
+  X,
+  MessageSquareText
 } from 'lucide-react';
 import Dashboard from './pages/dashboard';
 import QueueControl from './pages/queue.jsx';
@@ -19,6 +20,7 @@ import Appointments from './pages/appointments';
 import Offices from './pages/offices';
 import MobileUsers from './pages/users';
 import Profile from './pages/profile.jsx';
+import Feedback from './pages/feedback'; // Added Feedback page import
 import Login from './pages/login';
 
 export default function App() {
@@ -82,6 +84,8 @@ export default function App() {
         return <Offices />;
       case 'users':
         return <MobileUsers />;
+      case 'feedback':
+        return <Feedback />; // Added Feedback case
       case 'profile':
         return <Profile />;
       default:
@@ -95,6 +99,7 @@ export default function App() {
     { id: 'appointments', label: 'Appointments', icon: CalendarCheck },
     { id: 'offices', label: 'Offices', icon: Building2 },
     { id: 'users', label: 'Users', icon: Users },
+    { id: 'feedback', label: 'Feedback', icon: MessageSquareText }, // Added Feedback nav item
     { id: 'profile', label: 'Profile', icon: User },
   ];
 
