@@ -1,25 +1,92 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppointments } from '../hooks/useAppointments';
 import { X } from 'lucide-react';
+import { onAuthStateChanged } from 'firebase/auth';
+import { collection, query, where, getDocs } from 'firebase/firestore';
+import { auth, db } from '../services/firebase';
 import Clinic from '../components/queue/clinic';
 import Osas from '../components/queue/osas';
 import Swds from '../components/queue/swds';
 
+const ADMIN_EMAIL = 'qsystemssu123@gmail.com';
+
 export default function Queue() {
   const {
     appointments,
-    loading,
+    loading: appointmentsLoading,
     approveAppointment,
     rejectAppointment,
     completeAppointment,
   } = useAppointments();
 
+  const [currentUser, setCurrentUser] = useState(null);
+  const [staffOffice, setStaffOffice] = useState(null);
+  const [accessLoading, setAccessLoading] = useState(true);
   const [selectedOffice, setSelectedOffice] = useState('Clinic');
   const [selectedImage, setSelectedImage] = useState(null);
 
+  const isAdmin =
+    currentUser?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+
+  useEffect(() => {
+    let unsubscribe;
+
+    const loadUserAccess = async (user) => {
+      setCurrentUser(user);
+      setStaffOffice(null);
+
+      if (!user) {
+        setAccessLoading(false);
+        return;
+      }
+
+      if (user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+        setAccessLoading(false);
+        setSelectedOffice('Clinic'); // Default admin tab view
+        return;
+      }
+
+      try {
+        const staffQuery = query(
+          collection(db, 'staff'),
+          where('email', '==', user.email)
+        );
+        const staffSnapshot = await getDocs(staffQuery);
+
+        if (!staffSnapshot.empty) {
+          const staffData = staffSnapshot.docs[0].data();
+          const assignedOffice = String(
+            staffData.office || ''
+          ).trim();
+
+          if (assignedOffice) {
+            // Capitalize properly to match component keys: e.g. "CLINIC" -> "Clinic" or exact match
+            const formattedOffice =
+              assignedOffice.charAt(0).toUpperCase() +
+              assignedOffice.slice(1).toLowerCase();
+            setStaffOffice(formattedOffice);
+            setSelectedOffice(formattedOffice);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load staff access:', error);
+      } finally {
+        setAccessLoading(false);
+      }
+    };
+
+    unsubscribe = onAuthStateChanged(auth, loadUserAccess);
+
+    return () => {
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
+  }, []);
+
   const offices = ['Clinic', 'SWDS', 'OSAS'];
 
-  if (loading) {
+  if (appointmentsLoading || accessLoading) {
     return (
       <div className="flex h-64 items-center justify-center">
         <p className="text-sm font-medium text-slate-500 animate-pulse">
@@ -53,31 +120,37 @@ export default function Queue() {
             </p>
           </div>
 
-          {/* Office Switcher Tabs with Animated Highlight Borders */}
-          <div className="flex items-center bg-slate-100 p-1.5 rounded-2xl border border-slate-200/80 w-full lg:w-auto shadow-inner gap-1">
-            {offices.map((office) => {
-              const isSelected = selectedOffice === office;
-              return (
-                <button
-                  key={office}
-                  onClick={() => setSelectedOffice(office)}
-                  className={`flex-1 lg:flex-initial px-3 sm:px-5 py-2 sm:py-2.5 text-xs font-bold rounded-xl transition-all duration-300 transform active:scale-95 cursor-pointer whitespace-nowrap ${
-                    isSelected
-                      ? 'bg-white text-blue-700 shadow-md border-2 border-blue-500 ring-4 ring-purple-100 scale-102'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 border-2 border-transparent'
-                  }`}
-                >
-                  {office}
-                </button>
-              );
-            })}
-          </div>
+          {/* Office Switcher Tabs: Visible ONLY to Admin */}
+          {isAdmin ? (
+            <div className="flex items-center bg-slate-100 p-1.5 rounded-2xl border border-slate-200/80 w-full lg:w-auto shadow-inner gap-1">
+              {offices.map((office) => {
+                const isSelected = selectedOffice === office;
+                return (
+                  <button
+                    key={office}
+                    onClick={() => setSelectedOffice(office)}
+                    className={`flex-1 lg:flex-initial px-3 sm:px-5 py-2 sm:py-2.5 text-xs font-bold rounded-xl transition-all duration-300 transform active:scale-95 cursor-pointer whitespace-nowrap ${
+                      isSelected
+                        ? 'bg-white text-blue-700 shadow-md border-2 border-blue-500 ring-4 ring-purple-100 scale-102'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 border-2 border-transparent'
+                    }`}
+                  >
+                    {office}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="bg-slate-50 px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 shadow-inner">
+              Office Assignment: <span className="text-blue-600">{staffOffice}</span>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Conditional rendering of individual office components with fade-in animation */}
       <div key={selectedOffice} className="animate-fade-in-slow">
-        {selectedOffice === 'Clinic' && (
+        {selectedOffice.toLowerCase() === 'clinic' && (
           <Clinic
             appointments={appointments}
             approveAppointment={approveAppointment}
@@ -87,7 +160,7 @@ export default function Queue() {
           />
         )}
 
-        {selectedOffice === 'OSAS' && (
+        {selectedOffice.toLowerCase() === 'osas' && (
           <Osas
             appointments={appointments}
             approveAppointment={approveAppointment}
@@ -97,7 +170,7 @@ export default function Queue() {
           />
         )}
 
-        {selectedOffice === 'SWDS' && (
+        {selectedOffice.toLowerCase() === 'swds' && (
           <Swds
             appointments={appointments}
             approveAppointment={approveAppointment}
