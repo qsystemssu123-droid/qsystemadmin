@@ -71,13 +71,24 @@ export default function Login({ onLogin }) {
           userName: user.displayName || 'Admin User',
           userEmail: user.email || '',
           userPhoto: user.photoURL || null,
+          role: 'admin',
           lastLogin: serverTimestamp()
         },
         { merge: true }
       );
 
       if (onLogin) {
-        onLogin(user);
+        /*
+         * IMPORTANT:
+         * Explicitly attach role: 'admin' to the user object.
+         *
+         * This makes sure App.jsx and useAppLogic.jsx know
+         * that this account is the administrator.
+         */
+        onLogin({
+          ...user,
+          role: 'admin'
+        });
       }
     } catch (error) {
       console.error('Google Sign-In Error:', error);
@@ -116,6 +127,21 @@ export default function Login({ onLogin }) {
       );
 
       const user = userCredential.user;
+
+      /*
+       * Prevent the administrator email from being treated
+       * as a staff account through the staff login form.
+       */
+      if (user.email === 'qsystemssu123@gmail.com') {
+        await signOut(auth);
+
+        setErrorMessage(
+          'The administrator account must use the Google Admin Access login.'
+        );
+
+        setLoading(false);
+        return;
+      }
 
       // Verify if staff record exists in Firestore and matches selected office
       const staffDocRef = doc(db, 'staff', user.uid);
@@ -157,7 +183,8 @@ export default function Login({ onLogin }) {
           {
             lastLogin: serverTimestamp(),
             email: user.email,
-            office: staffData?.office || office
+            office: staffData?.office || office,
+            role: 'staff'
           },
           { merge: true }
         );
@@ -169,6 +196,12 @@ export default function Login({ onLogin }) {
       }
 
       if (onLogin) {
+        /*
+         * Explicitly attach role: 'staff'.
+         *
+         * This ensures staff can see Queue Control while
+         * remaining separated from the administrator role.
+         */
         onLogin({
           ...user,
           office: staffData?.office || office,

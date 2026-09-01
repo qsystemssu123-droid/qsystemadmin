@@ -283,8 +283,11 @@ export default function AppointmentsTable({
           <tbody className="divide-y divide-slate-100">
             {displayedAppointments.length > 0 ? (
               displayedAppointments.map((appt) => {
-                const isCompleted = appt.status === 'completed';
-                const isServing = appt.status === 'serving';
+                const statusLower = String(appt.status || '').trim().toLowerCase();
+                const isCompleted = statusLower === 'completed';
+                const isApproved = statusLower === 'approved';
+                const isRejected = statusLower === 'rejected';
+                const isServing = statusLower === 'serving';
 
                 return (
                   <tr
@@ -346,18 +349,26 @@ export default function AppointmentsTable({
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
                           isCompleted
                             ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            : isApproved
+                            ? 'bg-blue-50 text-blue-700 border-blue-200'
+                            : isRejected
+                            ? 'bg-rose-50 text-rose-700 border-rose-200'
                             : isServing
                             ? 'bg-amber-50 text-amber-700 border-amber-200 animate-pulse'
-                            : 'bg-sky-50 text-sky-700 border-sky-200'
+                            : 'bg-amber-50 text-amber-700 border-amber-200'
                         }`}
                       >
                         <span
                           className={`w-1.5 h-1.5 rounded-full ${
                             isCompleted
                               ? 'bg-emerald-500'
+                              : isApproved
+                              ? 'bg-blue-500'
+                              : isRejected
+                              ? 'bg-rose-500'
                               : isServing
                               ? 'bg-amber-500'
-                              : 'bg-sky-500'
+                              : 'bg-amber-500'
                           }`}
                         ></span>
 
