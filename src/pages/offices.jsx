@@ -1,35 +1,36 @@
+
 import { useState, useEffect } from 'react';
-import { 
-  getFirestore, 
-  collection, 
-  onSnapshot 
+import {
+  getFirestore,
+  collection,
+  onSnapshot
 } from 'firebase/firestore';
 
 export default function Offices() {
   const [offices, setOffices] = useState([
-    { 
-      name: 'OSAS (Office of Student Affairs and Services)', 
-      dbKey: 'OSAS', 
-      currentLoad: 'Low', 
+    {
+      name: 'OSAS (Office of Student Affairs and Services)',
+      dbKey: 'OSAS',
+      currentLoad: 'Low',
       appointmentCount: 0,
       location: '1st Floor, Student Center Building',
-      head: 'Dr. Maria Santos'
+      head: 'Loading staff...'
     },
-    { 
-      name: 'University Clinic', 
-      dbKey: 'CLINIC', 
-      currentLoad: 'Low', 
+    {
+      name: 'University Clinic',
+      dbKey: 'CLINIC',
+      currentLoad: 'Low',
       appointmentCount: 0,
       location: 'Ground Floor, Medical Building',
-      head: 'Dr. Juan Dela Cruz'
+      head: 'Loading staff...'
     },
-    { 
-      name: 'SWDS (Social Welfare & Development Services)', 
-      dbKey: 'SWDS', 
-      currentLoad: 'None', 
+    {
+      name: 'SWDS (Social Welfare & Development Services)',
+      dbKey: 'SWDS',
+      currentLoad: 'None',
       appointmentCount: 0,
       location: '2nd Floor, Administration Building',
-      head: 'Prof. Ana Reyes'
+      head: 'Loading staff...'
     },
   ]);
 
@@ -38,17 +39,60 @@ export default function Offices() {
   const isOpenDay = today >= 1 && today <= 5;
   const currentStatus = isOpenDay ? 'Open' : 'Closed';
 
+  // Real-time listener to fetch staff names from the "staff" collection
+  useEffect(() => {
+    const db = getFirestore();
+
+    const unsubscribe = onSnapshot(
+      collection(db, 'staff'),
+      (snapshot) => {
+        const staffDocs = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+
+        setOffices(prev => prev.map(office => {
+          const matchingStaff = staffDocs.filter(staff =>
+            String(staff.office || '').trim().toUpperCase() ===
+            office.dbKey.toUpperCase()
+          );
+
+          const staffNames = matchingStaff
+            .map(staff => staff.name)
+            .filter(Boolean);
+
+          return {
+            ...office,
+            head: staffNames.length > 0
+              ? staffNames.join(', ')
+              : 'No staff assigned'
+          };
+        }));
+      },
+      (error) => {
+        console.error('Error fetching staff:', error);
+
+        setOffices(prev => prev.map(office => ({
+          ...office,
+          head: 'Unable to load staff'
+        })));
+      }
+    );
+
+    return () => unsubscribe();
+  }, []);
+
   // Real-time listener to count "waiting" appointments from the "appointments" collection
   useEffect(() => {
     const db = getFirestore();
     const unsubscribe = onSnapshot(collection(db, 'appointments'), (snapshot) => {
       const docs = snapshot.docs.map(doc => doc.data());
-      
+
       setOffices(prev => prev.map(office => {
-        const officeDocs = docs.filter(d => 
+        const officeDocs = docs.filter(d =>
           d.office === office.dbKey || d.office === office.name
         );
-        
+
         const waitingCount = officeDocs.filter(d => d.status === 'waiting').length;
 
         let calculatedLoad = 'None';
@@ -108,7 +152,7 @@ export default function Offices() {
       {/* Header & Status Banner */}
       <div className="relative overflow-hidden bg-white p-6 sm:p-7 rounded-3xl border border-slate-200/80 shadow-xs">
         <div className="absolute top-0 right-0 -mt-8 -mr-8 w-48 h-48 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 rounded-full blur-2xl pointer-events-none" />
-        
+
         <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-5">
           <div className="space-y-1.5">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-100/80 text-indigo-700 text-xs font-semibold tracking-wide uppercase">
@@ -160,7 +204,7 @@ export default function Offices() {
           </div>
           <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center group-hover:scale-105 transition-transform duration-300">
             <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283-.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
             </svg>
           </div>
         </div>
@@ -184,8 +228,8 @@ export default function Offices() {
       {/* Main Office Cards Grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {offices.map((office, idx) => (
-          <div 
-            key={idx} 
+          <div
+            key={idx}
             className="group relative bg-white rounded-3xl p-6 border border-slate-200/80 shadow-xs hover:shadow-lg hover:border-slate-300 hover:-translate-y-0.5 transition-all duration-300 flex flex-col justify-between"
           >
             {/* Card Content */}
@@ -197,8 +241,8 @@ export default function Offices() {
 
                 {/* Status Dot Pill */}
                 <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${
-                  currentStatus === 'Open' 
-                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                  currentStatus === 'Open'
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                     : 'bg-rose-50 text-rose-700 border border-rose-200'
                 }`}>
                   <span className={`h-2 w-2 rounded-full ${currentStatus === 'Open' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
@@ -224,7 +268,9 @@ export default function Offices() {
                     <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                     </svg>
-                    <span>Head: <strong className="text-slate-700 font-semibold">{office.head}</strong></span>
+                    <span>
+                      Staff: <strong className="text-slate-700 font-semibold">{office.head}</strong>
+                    </span>
                   </div>
                 </div>
               </div>
