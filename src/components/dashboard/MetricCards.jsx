@@ -42,7 +42,7 @@ export default function MetricCards({ bookedTodayCount, registeredUsersCount, ac
         </div>
         <p className="text-3xl font-bold text-slate-900 mt-3 transition-transform duration-300 group-hover:translate-x-1">{activeOfficesCount}</p>
         <div className="flex items-center gap-1.5 mt-3 text-xs font-semibold text-amber-600">
-          <span>OSAS, CLINIC, SWDS</span>
+          <span>SWDS</span>
         </div>
       </div>
 
