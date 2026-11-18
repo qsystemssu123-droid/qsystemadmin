@@ -1,9 +1,16 @@
+
 import { useState } from 'react';
 import { useAppointments } from '../hooks/useAppointments';
 import AppointmentsTable from '../components/appointments/AppointmentsTable.jsx';
 
 export default function Appointments() {
-  const { appointments = [], loading } = useAppointments();
+  const {
+    appointments = [],
+    loading,
+    clearingAppointments,
+    clearAllAppointments
+  } = useAppointments();
+
   const [searchTerm, setSearchTerm] = useState('');
   const [filterOffice, setFilterOffice] = useState('ALL');
 
@@ -22,16 +29,22 @@ export default function Appointments() {
     if (item.office) {
       acc[item.office] = (acc[item.office] || 0) + 1;
     }
+
     return acc;
   }, {});
 
   // Filter appointments based on search term and selected office
   const filteredAppointments = appointments.filter((item) => {
+    const normalizedSearch = searchTerm.toLowerCase();
+
     const matchesSearch =
-      item.userName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.userEmail?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.service?.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesOffice = filterOffice === 'ALL' || item.office === filterOffice;
+      item.userName?.toLowerCase().includes(normalizedSearch) ||
+      item.userEmail?.toLowerCase().includes(normalizedSearch) ||
+      item.service?.toLowerCase().includes(normalizedSearch);
+
+    const matchesOffice =
+      filterOffice === 'ALL' || item.office === filterOffice;
+
     return matchesSearch && matchesOffice;
   });
 
@@ -48,6 +61,7 @@ export default function Appointments() {
             transform: translateY(0);
           }
         }
+
         .animate-fade-in {
           animation: fadeIn 3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
@@ -60,6 +74,7 @@ export default function Appointments() {
             <h1 className="text-2xl font-bold tracking-tight text-slate-900">
               Student Bookings & Appointments
             </h1>
+
             <p className="text-sm text-slate-500 mt-1">
               Manage serving, waiting, priority, and completed student bookings in real-time.
             </p>
@@ -75,6 +90,9 @@ export default function Appointments() {
         filterOffice={filterOffice}
         setFilterOffice={setFilterOffice}
         officeCounts={officeCounts}
+        totalAppointments={appointments.length}
+        clearingAppointments={clearingAppointments}
+        clearAllAppointments={clearAllAppointments}
       />
     </div>
   );

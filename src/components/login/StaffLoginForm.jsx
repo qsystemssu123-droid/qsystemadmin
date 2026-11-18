@@ -1,3 +1,4 @@
+
 import {
   Building2,
   Mail,
@@ -68,6 +69,7 @@ export default function StaffLoginForm({
             type="button"
             onClick={() => setShowPassword(!showPassword)}
             className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+            aria-label={showPassword ? 'Hide password' : 'Show password'}
           >
             {showPassword ? (
               <Eye className="w-4 h-4" />
@@ -78,6 +80,7 @@ export default function StaffLoginForm({
         </div>
       </div>
 
+      {/* SWDS ONLY - Office Assignment */}
       <div>
         <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
           Office Assignment
@@ -97,8 +100,7 @@ export default function StaffLoginForm({
             <option value="" disabled>
               Choose an office
             </option>
-            <option value="CLINIC">CLINIC</option>
-            <option value="OSAS">OSAS</option>
+
             <option value="SWDS">SWDS</option>
           </select>
         </div>

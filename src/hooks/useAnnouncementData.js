@@ -1,19 +1,18 @@
+
 import { useState, useEffect } from 'react';
 import { db, auth } from '../services/firebase';
 import { collection, doc, getDocs, setDoc, query, where } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { ADMIN_EMAIL } from '../utils/announcementConstants';
 
+const OFFICE_NAME = 'SWDS';
+
 export function useAnnouncementData() {
   const [offices, setOffices] = useState({
-    OSAS: { isBusy: false, reason: '' },
-    CLINIC: { isBusy: false, reason: '' },
     SWDS: { isBusy: false, reason: '' },
   });
 
   const [officeReasons, setOfficeReasons] = useState({
-    OSAS: '',
-    CLINIC: '',
     SWDS: '',
   });
 
@@ -24,7 +23,8 @@ export function useAnnouncementData() {
   const [actionLoading, setActionLoading] = useState(null);
   const [successMessage, setSuccessMessage] = useState('');
 
-  const isAdmin = currentUser?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+  const isAdmin =
+    currentUser?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
 
   useEffect(() => {
     let mounted = true;
@@ -33,6 +33,7 @@ export function useAnnouncementData() {
       if (!mounted) return;
 
       setCurrentUser(user);
+      setAccessLoading(true);
 
       if (!user) {
         setStaffOffice(null);
@@ -47,16 +48,23 @@ export function useAnnouncementData() {
       }
 
       try {
-        const staffQuery = query(collection(db, 'staff'), where('email', '==', user.email));
+        const staffQuery = query(
+          collection(db, 'staff'),
+          where('email', '==', user.email)
+        );
+
         const staffSnapshot = await getDocs(staffQuery);
 
         if (!mounted) return;
 
         if (!staffSnapshot.empty) {
           const staffData = staffSnapshot.docs[0].data();
-          const assignedOffice = String(staffData.office || '').trim().toUpperCase();
 
-          if (['OSAS', 'CLINIC', 'SWDS'].includes(assignedOffice)) {
+          const assignedOffice = String(
+            staffData.office || ''
+          ).trim().toUpperCase();
+
+          if (assignedOffice === OFFICE_NAME) {
             setStaffOffice(assignedOffice);
           } else {
             setStaffOffice(null);
@@ -65,10 +73,18 @@ export function useAnnouncementData() {
           setStaffOffice(null);
         }
       } catch (error) {
-        console.error('Failed to load staff office assignment:', error);
-        if (mounted) setStaffOffice(null);
+        console.error(
+          'Failed to load staff office assignment:',
+          error
+        );
+
+        if (mounted) {
+          setStaffOffice(null);
+        }
       } finally {
-        if (mounted) setAccessLoading(false);
+        if (mounted) {
+          setAccessLoading(false);
+        }
       }
     });
 
@@ -79,30 +95,38 @@ export function useAnnouncementData() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
+
     const fetchOfficesFromFirestore = async () => {
       try {
-        const querySnapshot = await getDocs(collection(db, 'offices'));
+        // Only fetch the SWDS office.
+        const officeQuery = query(
+          collection(db, 'offices'),
+          where('__name__', '==', OFFICE_NAME)
+        );
+
+        const querySnapshot = await getDocs(officeQuery);
+
         const fetchedOffices = {
-          OSAS: { isBusy: false, reason: '' },
-          CLINIC: { isBusy: false, reason: '' },
           SWDS: { isBusy: false, reason: '' },
         };
 
         if (querySnapshot.empty) {
-          for (const key of ['OSAS', 'CLINIC', 'SWDS']) {
-            await setDoc(doc(db, 'offices', key), {
+          await setDoc(
+            doc(db, 'offices', OFFICE_NAME),
+            {
               isBusy: false,
               reason: '',
               updatedAt: new Date().toISOString(),
-            });
-          }
+            },
+            { merge: true }
+          );
         } else {
           querySnapshot.forEach((docSnap) => {
             const data = docSnap.data();
-            const officeKey = docSnap.id.toUpperCase();
 
-            if (Object.prototype.hasOwnProperty.call(fetchedOffices, officeKey)) {
-              fetchedOffices[officeKey] = {
+            if (docSnap.id.toUpperCase() === OFFICE_NAME) {
+              fetchedOffices.SWDS = {
                 isBusy: !!data.isBusy,
                 reason: data.reason || '',
               };
@@ -110,30 +134,50 @@ export function useAnnouncementData() {
           });
         }
 
-        setOffices(fetchedOffices);
+        if (mounted) {
+          setOffices(fetchedOffices);
+        }
       } catch (error) {
-        console.error('Error fetching offices from Firestore:', error);
+        console.error(
+          'Error fetching SWDS office from Firestore:',
+          error
+        );
       } finally {
-        setLoading(false);
+        if (mounted) {
+          setLoading(false);
+        }
       }
     };
 
     fetchOfficesFromFirestore();
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const canControlOffice = (officeKey) => {
+    if (officeKey !== OFFICE_NAME) return false;
+
     if (isAdmin) return true;
+
     return staffOffice === officeKey;
   };
 
   const handleReasonChange = (officeKey, val) => {
     if (!canControlOffice(officeKey)) return;
-    setOfficeReasons((prev) => ({ ...prev, [officeKey]: val }));
+
+    setOfficeReasons((prev) => ({
+      ...prev,
+      [officeKey]: val,
+    }));
   };
 
   const handleToggleBooking = async (officeKey) => {
     if (!canControlOffice(officeKey)) {
-      alert(`You are not authorized to modify the ${officeKey} Office. You can only manage your assigned office: ${staffOffice}.`);
+      alert(
+        `You are not authorized to modify the ${officeKey} Office. You can only manage your assigned office: ${staffOffice || 'None'}.`
+      );
       return;
     }
 
@@ -142,15 +186,21 @@ export function useAnnouncementData() {
     const currentReason = officeReasons[officeKey];
 
     if (newStatus && !currentReason.trim()) {
-      alert(`Please select a preset reason or type a custom reason before disabling bookings for ${officeKey}.`);
+      alert(
+        `Please select a preset reason or type a custom reason before disabling bookings for ${officeKey}.`
+      );
       return;
     }
 
-    const finalReason = newStatus ? currentReason.trim() : '';
+    const finalReason = newStatus
+      ? currentReason.trim()
+      : '';
+
     setActionLoading(officeKey);
 
     try {
       const officeDocRef = doc(db, 'offices', officeKey);
+
       await setDoc(
         officeDocRef,
         {
@@ -163,11 +213,17 @@ export function useAnnouncementData() {
 
       setOffices((prev) => ({
         ...prev,
-        [officeKey]: { isBusy: newStatus, reason: finalReason },
+        [officeKey]: {
+          isBusy: newStatus,
+          reason: finalReason,
+        },
       }));
 
       if (!newStatus) {
-        setOfficeReasons((prev) => ({ ...prev, [officeKey]: '' }));
+        setOfficeReasons((prev) => ({
+          ...prev,
+          [officeKey]: '',
+        }));
       }
 
       setSuccessMessage(
@@ -178,8 +234,14 @@ export function useAnnouncementData() {
 
       setTimeout(() => setSuccessMessage(''), 4000);
     } catch (error) {
-      console.error('Error updating office status in Firestore:', error);
-      alert('Failed to update office status. Please check your Firestore connection/rules.');
+      console.error(
+        'Error updating office status in Firestore:',
+        error
+      );
+
+      alert(
+        'Failed to update office status. Please check your Firestore connection/rules.'
+      );
     } finally {
       setActionLoading(null);
     }

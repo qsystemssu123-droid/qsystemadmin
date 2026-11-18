@@ -1,3 +1,4 @@
+
 import { useState } from 'react';
 import {
   Megaphone,
@@ -35,7 +36,8 @@ export default function Announcement() {
     handleToggleBooking,
   } = useAnnouncementData();
 
-  const filteredOfficeKeys = ['OSAS', 'CLINIC', 'SWDS'].filter(
+  // UPDATED: Only SWDS is displayed.
+  const filteredOfficeKeys = ['SWDS'].filter(
     (officeKey) =>
       officeKey.toLowerCase().includes(searchQuery.toLowerCase()) ||
       offices[officeKey].reason.toLowerCase().includes(searchQuery.toLowerCase())
@@ -57,8 +59,14 @@ export default function Announcement() {
     <div className="w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6 [animation:fadeIn_2s_ease-in-out] font-sans">
       <style>{`
         @keyframes fadeIn {
-          from { opacity: 0; transform: translateY(4px); }
-          to { opacity: 1; transform: translateY(0); }
+          from {
+            opacity: 0;
+            transform: translateY(4px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
         }
       `}</style>
 
@@ -68,12 +76,14 @@ export default function Announcement() {
           <div className="w-12 h-12 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center shrink-0 border border-sky-100">
             <Megaphone className="w-6 h-6" />
           </div>
+
           <div>
             <h1 className="text-xl font-bold text-slate-900 tracking-tight">
               Office Status & Alerts
             </h1>
+
             <p className="text-sm text-slate-500 mt-0.5">
-              Manage live office availability, sync state directly with Firestore (
+              Manage live SWDS office availability, sync state directly with Firestore (
               <span className="font-semibold text-slate-700">offices</span> collection), and control bookings in real time.
             </p>
           </div>
@@ -92,7 +102,9 @@ export default function Announcement() {
       {successMessage && (
         <div className="bg-emerald-50 text-emerald-900 px-4 py-3.5 rounded-xl border border-emerald-200 text-sm flex items-center gap-3 shadow-xs w-full">
           <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-          <span className="font-medium">{successMessage}</span>
+          <span className="font-medium">
+            {successMessage}
+          </span>
         </div>
       )}
 
@@ -100,14 +112,20 @@ export default function Announcement() {
       <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex items-center justify-between gap-4">
         <div>
           <p className="text-xs font-bold text-slate-700">
-            {isAdmin ? 'Administrator Access' : 'Staff Office Access'}
+            {isAdmin
+              ? 'Administrator Access'
+              : 'Staff Office Access'}
           </p>
+
           <p className="text-xs text-slate-500 mt-0.5">
-            {isAdmin ? 'You can manage office availability for all offices.' : `You can only manage the ${staffOffice} Office.`}
+            {isAdmin
+              ? 'You can manage SWDS office availability.'
+              : `You can only manage the ${staffOffice} Office.`}
           </p>
         </div>
+
         <span className="shrink-0 inline-flex items-center px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-bold text-slate-700">
-          {isAdmin ? 'ALL OFFICES' : `${staffOffice} ONLY`}
+          SWDS ONLY
         </span>
       </div>
 
@@ -115,11 +133,14 @@ export default function Announcement() {
       <div className="bg-white border border-slate-200/80 rounded-2xl p-6 shadow-xs space-y-6 w-full">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-slate-100 w-full">
           <div>
-            <h2 className="text-base font-bold text-slate-900">Department Control Hub</h2>
+            <h2 className="text-base font-bold text-slate-900">
+              Department Control Hub
+            </h2>
+
             <p className="text-xs text-slate-500">
               {isAdmin
-                ? 'Toggle live booking states for OSAS, CLINIC, and SWDS departments.'
-                : `Toggle live booking state for ${staffOffice} department only. Other departments are read-only.`}
+                ? 'Toggle live booking status for the SWDS department.'
+                : `Toggle live booking status for ${staffOffice} department only.`}
             </p>
           </div>
 
@@ -128,6 +149,7 @@ export default function Announcement() {
               <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-slate-400">
                 <Search className="w-4 h-4" />
               </span>
+
               <input
                 type="text"
                 value={searchQuery}
@@ -143,7 +165,11 @@ export default function Announcement() {
         <div className="grid grid-cols-1 gap-5 w-full">
           {filteredOfficeKeys.length === 0 ? (
             <div className="text-center py-10 text-slate-400 text-sm border border-dashed border-slate-200 rounded-xl">
-              No matching offices found for &quot;<span className="font-semibold text-slate-600">{searchQuery}</span>&quot;.
+              No matching offices found for &quot;
+              <span className="font-semibold text-slate-600">
+                {searchQuery}
+              </span>
+              &quot;.
             </div>
           ) : (
             filteredOfficeKeys.map((officeKey) => {
@@ -187,18 +213,25 @@ export default function Announcement() {
                       >
                         <Building2 className="w-5 h-5" />
                       </div>
+
                       <div>
                         <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                           {officeKey} Office
+
                           {isLockedForStaff && (
                             <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-slate-200 text-slate-500 border border-slate-300">
                               Read Only
                             </span>
                           )}
                         </h3>
+
                         <p className="text-xs text-slate-400">
-                          Firestore Doc ID: <span className="font-mono text-slate-600">{officeKey}</span>
+                          Firestore Doc ID:{' '}
+                          <span className="font-mono text-slate-600">
+                            {officeKey}
+                          </span>
                         </p>
+
                         {isLockedForStaff && (
                           <p className="text-[11px] text-slate-500 mt-1 font-medium">
                             Only {officeKey} staff and the administrator can modify this office.
@@ -225,6 +258,7 @@ export default function Announcement() {
                             : 'bg-emerald-500'
                         }`}
                       />
+
                       {isLockedForStaff
                         ? 'READ ONLY'
                         : office.isBusy
@@ -243,14 +277,30 @@ export default function Announcement() {
                     >
                       <ShieldAlert
                         className={`w-4 h-4 shrink-0 mt-0.5 ${
-                          isLockedForStaff ? 'text-slate-500' : 'text-rose-600'
+                          isLockedForStaff
+                            ? 'text-slate-500'
+                            : 'text-rose-600'
                         }`}
                       />
+
                       <div>
-                        <span className={`font-bold ${isLockedForStaff ? 'text-slate-700' : 'text-rose-950'}`}>
+                        <span
+                          className={`font-bold ${
+                            isLockedForStaff
+                              ? 'text-slate-700'
+                              : 'text-rose-950'
+                          }`}
+                        >
                           Active Notice Reason:{' '}
                         </span>
-                        <span className={isLockedForStaff ? 'text-slate-600' : 'text-rose-800'}>
+
+                        <span
+                          className={
+                            isLockedForStaff
+                              ? 'text-slate-600'
+                              : 'text-rose-800'
+                          }
+                        >
                           {office.reason || 'No reason provided'}
                         </span>
                       </div>
@@ -259,7 +309,9 @@ export default function Announcement() {
 
                   <div
                     className={`border rounded-xl p-4 ml-2 flex flex-col gap-4 ${
-                      isLockedForStaff ? 'bg-slate-100 border-slate-200' : 'bg-slate-50 border-slate-100'
+                      isLockedForStaff
+                        ? 'bg-slate-100 border-slate-200'
+                        : 'bg-slate-50 border-slate-100'
                     }`}
                   >
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -268,6 +320,7 @@ export default function Announcement() {
                           <Clock className="w-3.5 h-3.5 text-slate-400" />
                           Select Preset Reason:
                         </label>
+
                         <div className="relative">
                           <select
                             disabled={isLockedForStaff}
@@ -277,9 +330,14 @@ export default function Announcement() {
                                 : 'border-slate-200 bg-white text-slate-700 cursor-pointer'
                             }`}
                             value={currentReasonValue}
-                            onChange={(e) => handleReasonChange(officeKey, e.target.value)}
+                            onChange={(e) =>
+                              handleReasonChange(officeKey, e.target.value)
+                            }
                           >
-                            <option value="">-- Choose a preset reason --</option>
+                            <option value="">
+                              -- Choose a preset reason --
+                            </option>
+
                             {COMMON_REASONS.map((reason, index) => (
                               <option key={index} value={reason}>
                                 {reason}
@@ -293,12 +351,15 @@ export default function Announcement() {
                         <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
                           Or Type Custom Reason:
                         </label>
+
                         <input
                           type="text"
                           disabled={isLockedForStaff}
                           placeholder="e.g. Brief emergency maintenance..."
                           value={currentReasonValue}
-                          onChange={(e) => handleReasonChange(officeKey, e.target.value)}
+                          onChange={(e) =>
+                            handleReasonChange(officeKey, e.target.value)
+                          }
                           className={`w-full px-3.5 py-2.5 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all shadow-2xs ${
                             isLockedForStaff
                               ? 'border-slate-200 bg-slate-200 text-slate-400 placeholder:text-slate-400 cursor-not-allowed'
@@ -332,6 +393,7 @@ export default function Announcement() {
                         ) : (
                           <Power className="w-3.5 h-3.5" />
                         )}
+
                         {isLockedForStaff
                           ? `Manage ${officeKey} Disabled`
                           : office.isBusy
