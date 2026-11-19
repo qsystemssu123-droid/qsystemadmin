@@ -8,7 +8,15 @@ export default function Appointments() {
     appointments = [],
     loading,
     clearingAppointments,
-    clearAllAppointments
+    clearAllAppointments,
+
+    // Feedback functionality
+    generateFeedbackLink,
+    getAppointmentFeedbackLink,
+    copyFeedbackReference,
+    copyFeedbackLink,
+    copyingFeedbackId,
+    feedbackCopyError
   } = useAppointments();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -93,6 +101,14 @@ export default function Appointments() {
         totalAppointments={appointments.length}
         clearingAppointments={clearingAppointments}
         clearAllAppointments={clearAllAppointments}
+
+        // Feedback functionality
+        generateFeedbackLink={generateFeedbackLink}
+        getAppointmentFeedbackLink={getAppointmentFeedbackLink}
+        copyFeedbackReference={copyFeedbackReference}
+        copyFeedbackLink={copyFeedbackLink}
+        copyingFeedbackId={copyingFeedbackId}
+        feedbackCopyError={feedbackCopyError}
       />
     </div>
   );

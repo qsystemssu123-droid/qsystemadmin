@@ -1,3 +1,4 @@
+
 import Dashboard from './pages/dashboard';
 import QueueControl from './pages/queue.jsx';
 import Appointments from './pages/appointments';
@@ -9,6 +10,9 @@ import Feedback from './pages/feedback';
 import Ratings from './pages/ratings';
 import Announcement from './pages/announcement';
 import Login from './pages/login';
+
+// NEW: Public feedback page
+import PublicFeedback from './pages/publicFeedback.jsx';
 
 import Sidebar from './components/shared/Sidebar.jsx';
 import Header from './components/shared/Header.jsx';
@@ -35,6 +39,26 @@ export default function App() {
     adminInitials
   } = useAppLogic();
 
+  // NEW:
+  // Public feedback route.
+  // This page is accessible without admin/staff login.
+  // It does not display the admin sidebar or header.
+  const currentPath =
+    typeof window !== 'undefined'
+      ? window.location.pathname.replace(/\/+$/, '') || '/'
+      : '/';
+
+  const isPublicFeedbackPage =
+    currentPath === '/public-feedback';
+
+  // IMPORTANT:
+  // Public route is checked BEFORE authentication loading,
+  // login redirects, and admin dashboard rendering.
+  if (isPublicFeedbackPage) {
+    return <PublicFeedback />;
+  }
+
+  // EXISTING: Authentication loading screen
   if (loadingAuth) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-sky-950 text-white">
@@ -43,6 +67,7 @@ export default function App() {
     );
   }
 
+  // EXISTING: Login screen
   if (!isAuthenticated) {
     return (
       <Login
@@ -62,6 +87,7 @@ export default function App() {
     );
   }
 
+  // EXISTING: Admin and staff page navigation
   const renderPage = () => {
     // Extra protection:
     // ADMIN MUST NEVER be able to access Queue Control.
@@ -110,6 +136,7 @@ export default function App() {
     }
   };
 
+  // EXISTING: Main admin dashboard layout
   return (
     <div className="flex h-screen bg-sky-50 text-slate-800 font-sans overflow-hidden relative">
       <Sidebar
