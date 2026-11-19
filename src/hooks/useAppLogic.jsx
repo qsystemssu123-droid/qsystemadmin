@@ -166,7 +166,7 @@ export function useAppLogic() {
     },
     {
       id: 'offices',
-      label: 'Offices',
+      label: 'SWDS',
       icon: Building2
     },
     {

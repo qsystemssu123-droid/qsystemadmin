@@ -47,7 +47,6 @@ export default function Dashboard() {
         <MetricCards
           bookedTodayCount={metrics.bookedTodayCount}
           registeredUsersCount={REGISTERED_USERS.length}
-          activeOfficesCount={Object.keys(metrics.officeCounts).length || 3}
           completionRate={metrics.completionRate}
           completedCount={metrics.completedCount}
           totalBookings={metrics.totalBookings}

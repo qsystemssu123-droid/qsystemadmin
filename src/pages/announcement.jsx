@@ -79,12 +79,11 @@ export default function Announcement() {
 
           <div>
             <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-              Office Status & Alerts
+              Office Status
             </h1>
 
             <p className="text-sm text-slate-500 mt-0.5">
-              Manage live SWDS office availability, sync state directly with Firestore (
-              <span className="font-semibold text-slate-700">offices</span> collection), and control bookings in real time.
+              Manage live SWDS office availability, sync state directly with Firestore and control bookings in real time.
             </p>
           </div>
         </div>

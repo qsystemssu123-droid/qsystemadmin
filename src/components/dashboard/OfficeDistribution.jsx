@@ -37,7 +37,7 @@ export default function OfficeDistribution({ officeCounts, totalBookings }) {
       </div>
 
       <div className="mt-6 pt-4 border-t border-sky-100 flex items-center justify-between text-xs text-slate-500">
-        <span>Sample Office: OSAS, Registrar, Cashier</span>
+        <span>SWDS</span>
         <span className="font-semibold text-sky-700 animate-pulse">Updated Live</span>
       </div>
     </div>
