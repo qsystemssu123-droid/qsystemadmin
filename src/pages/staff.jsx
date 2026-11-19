@@ -21,7 +21,6 @@ import {
   UserPlus,
   Mail,
   Lock,
-  Building2,
   Trash2,
   AlertCircle,
   CheckCircle2,
@@ -32,12 +31,14 @@ import {
   KeyRound
 } from 'lucide-react';
 
+// Automatically assigned office for all new staff accounts
+const DEFAULT_STAFF_OFFICE = 'SWDS';
+
 export default function Staff() {
   // Form states
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [office, setOffice] = useState('');
 
   // UI states
   const [staffList, setStaffList] = useState([]);
@@ -98,12 +99,8 @@ export default function Staff() {
     setError('');
     setSuccessMsg('');
 
-    // Require a valid office selection
-    if (!office) {
-      setError('Please select an office before creating a staff account.');
-      return;
-    }
-
+    // Office is automatically assigned as SWDS.
+    // No office selection is required from the user.
     setLoading(true);
 
     try {
@@ -126,10 +123,11 @@ export default function Staff() {
 
       const uid = userCredential.user.uid;
 
+      // Automatically save SWDS as the staff office in Firestore.
       await setDoc(doc(db, 'staff', uid), {
         name: name,
         email: email,
-        office: office,
+        office: DEFAULT_STAFF_OFFICE,
         createdAt: serverTimestamp()
       });
 
@@ -138,7 +136,6 @@ export default function Staff() {
       setName('');
       setEmail('');
       setPassword('');
-      setOffice('');
 
       setSuccessMsg('Staff member successfully created and assigned!');
 
@@ -323,37 +320,14 @@ export default function Staff() {
               </div>
             </div>
 
-            {/* Assigned Office */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Assigned Office
-              </label>
+            {/*
+              Assigned Office dropdown removed from the UI.
 
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
-                  <Building2 className="w-4 h-4" />
-                </span>
+              All newly created staff accounts are automatically
+              assigned to SWDS through DEFAULT_STAFF_OFFICE.
 
-                <select
-                  value={office}
-                  onChange={(e) => setOffice(e.target.value)}
-                  required
-                  className={`w-full pl-9 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white transition-all cursor-pointer ${
-                    office === ''
-                      ? 'text-slate-400'
-                      : 'text-slate-900'
-                  }`}
-                >
-                  <option value="" disabled className="text-slate-400">
-                    Select Office
-                  </option>
-
-                  <option value="SWDS" className="text-slate-900">
-                    SWDS
-                  </option>
-                </select>
-              </div>
-            </div>
+              The office field is still saved in Firestore.
+            */}
 
             {/* Create Staff Button */}
             <button

@@ -1,6 +1,5 @@
 
 import {
-  Building2,
   Mail,
   Lock,
   Eye,
@@ -13,8 +12,6 @@ export default function StaffLoginForm({
   setEmail,
   password,
   setPassword,
-  office,
-  setOffice,
   showPassword,
   setShowPassword,
   loading,
@@ -25,6 +22,7 @@ export default function StaffLoginForm({
       onSubmit={onSubmit}
       className="space-y-4 text-left"
     >
+      {/* Staff Email */}
       <div>
         <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
           Staff Email
@@ -46,6 +44,7 @@ export default function StaffLoginForm({
         </div>
       </div>
 
+      {/* Password */}
       <div>
         <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
           Password
@@ -65,6 +64,7 @@ export default function StaffLoginForm({
             className="w-full pl-9 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"
           />
 
+          {/* Show / Hide Password */}
           <button
             type="button"
             onClick={() => setShowPassword(!showPassword)}
@@ -80,32 +80,26 @@ export default function StaffLoginForm({
         </div>
       </div>
 
-      {/* SWDS ONLY - Office Assignment */}
-      <div>
-        <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-          Office Assignment
-        </label>
+      {/*
+        AUTOMATIC OFFICE DETECTION
 
-        <div className="relative">
-          <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
-            <Building2 className="w-4 h-4" />
-          </span>
+        Office selection is not required.
 
-          <select
-            value={office}
-            onChange={(e) => setOffice(e.target.value)}
-            required
-            className="w-full pl-9 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all cursor-pointer"
-          >
-            <option value="" disabled>
-              Choose an office
-            </option>
+        The parent login handler should:
+        1. Authenticate the staff email and password.
+        2. Get the authenticated Firebase user's UID.
+        3. Retrieve the matching document from Firestore.
+        4. Read the staff document's office field.
+        5. Continue login using the assigned office.
 
-            <option value="SWDS">SWDS</option>
-          </select>
-        </div>
-      </div>
+        Firestore collection: staff
+        Office field example: SWDS
 
+        Office assignment must not depend on
+        user-selected values.
+      */}
+
+      {/* Staff Sign In Button */}
       <button
         type="submit"
         disabled={loading}

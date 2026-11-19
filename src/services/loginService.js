@@ -1,10 +1,13 @@
+
 import {
   signInWithPopup,
   GoogleAuthProvider,
   signInWithEmailAndPassword,
   signOut
 } from 'firebase/auth';
+
 import { db, auth } from './firebase.js';
+
 import {
   doc,
   setDoc,
@@ -14,6 +17,7 @@ import {
 
 const ADMIN_EMAIL = 'qsystemssu123@gmail.com';
 
+// Google Administrator Login
 export const handleGoogleLogin = async () => {
   const provider = new GoogleAuthProvider();
 
@@ -65,16 +69,19 @@ export const handleGoogleLogin = async () => {
       throw error;
     }
 
-    throw new Error("You're not authorized to login", { cause: error });
+    throw new Error("You're not authorized to login", {
+      cause: error
+    });
   }
 };
 
+// Staff Email Login - Automatic Firestore Office Detection
 export const handleStaffEmailLogin = async ({
   email,
-  password,
-  office
+  password
 }) => {
   try {
+    // Authenticate staff using Firebase Authentication.
     const userCredential = await signInWithEmailAndPassword(
       auth,
       email.trim(),
@@ -83,7 +90,10 @@ export const handleStaffEmailLogin = async ({
 
     const user = userCredential.user;
 
-    if (user.email === ADMIN_EMAIL) {
+    // Administrator accounts must use Google login.
+    if (
+      user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()
+    ) {
       await signOut(auth);
 
       throw new Error(
@@ -91,7 +101,9 @@ export const handleStaffEmailLogin = async ({
       );
     }
 
+    // Retrieve staff record using authenticated Firebase UID.
     const staffDocRef = doc(db, 'staff', user.uid);
+
     let staffData = null;
 
     try {
@@ -101,31 +113,66 @@ export const handleStaffEmailLogin = async ({
         staffData = staffDoc.data();
       }
     } catch (firestoreErr) {
-      console.warn(
-        'Firestore rule restriction encountered during staff lookup, proceeding with authenticated session:',
+      console.error(
+        'Firestore error during staff lookup:',
         firestoreErr
       );
-    }
-
-    if (
-      staffData &&
-      staffData.office &&
-      staffData.office !== office
-    ) {
-      await signOut(auth);
 
       throw new Error(
-        `Selected office (${office}) does not match your assigned office (${staffData.office}).`
+        'Unable to verify your staff account. Please contact the administrator.',
+        { cause: firestoreErr }
       );
     }
 
+    // Only registered staff accounts are allowed.
+    if (!staffData) {
+      throw new Error(
+        'Staff account not found. Please contact the administrator.'
+      );
+    }
+
+    // Verify that the authenticated email matches
+    // the email registered in the staff collection.
+    const authenticatedEmail = user.email?.trim().toLowerCase();
+
+    const registeredEmail = staffData.email
+      ?.trim()
+      .toLowerCase();
+
+    if (
+      !authenticatedEmail ||
+      !registeredEmail ||
+      authenticatedEmail !== registeredEmail
+    ) {
+      throw new Error(
+        'Your email does not match the registered staff account.'
+      );
+    }
+
+    // Automatically detect the office from Firestore.
+    // No dropdown or manual office selection is needed.
+    const assignedOffice = staffData.office?.trim();
+
+    if (!assignedOffice) {
+      throw new Error(
+        'No office is assigned to your staff account. Please contact the administrator.'
+      );
+    }
+
+    console.log(
+      'Staff office automatically detected:',
+      assignedOffice
+    );
+
+    // Update staff login information.
+    // Preserve the office value stored in Firestore.
     try {
       await setDoc(
         staffDocRef,
         {
           lastLogin: serverTimestamp(),
           email: user.email,
-          office: staffData?.office || office,
+          office: assignedOffice,
           role: 'staff'
         },
         { merge: true }
@@ -137,9 +184,14 @@ export const handleStaffEmailLogin = async ({
       );
     }
 
+    // Return authenticated staff information
+    // with the automatically detected office.
     return {
       ...user,
-      office: staffData?.office || office,
+      uid: user.uid,
+      email: user.email,
+      name: staffData.name || user.displayName || '',
+      office: assignedOffice,
       role: 'staff'
     };
   } catch (error) {
@@ -160,7 +212,10 @@ export const handleStaffEmailLogin = async ({
       error?.code === 'auth/user-not-found' ||
       error?.code === 'auth/wrong-password'
     ) {
-      throw new Error('Incorrect staff email or password.', { cause: error });
+      throw new Error(
+        'Incorrect staff email or password.',
+        { cause: error }
+      );
     }
 
     throw error;

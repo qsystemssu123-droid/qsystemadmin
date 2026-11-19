@@ -1,5 +1,5 @@
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CheckCircle2,
   XCircle,
@@ -11,16 +11,67 @@ import {
   Loader2,
   Clock3,
   Play,
+  UserPlus,
+  X,
 } from "lucide-react";
 import {
   doc,
+  collection,
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
 import { auth, db } from "../../services/firebase";
 
+const SWDS_SERVICES = [
+  'Guidance & Counseling Services',
+  'Services for Students with Special Needs & PWDs',
+  'Psychological & Wellness Services',
+  'Information & Orientation Services',
+  'Economic Enterprise Development',
+  'Career & Placement Services / PESO',
+  'Admission & Recruitment Services',
+  'University Student Council',
+  'Student Organizations',
+  'Multi-Faith Services',
+];
+
 const OFFICE_NAME = "SWDS";
 const PUBLIC_QUEUE_COLLECTION = "queues";
+const PHILIPPINE_TIME_ZONE = "Asia/Manila";
+
+// The queue is numbered separately for each Philippine calendar day.
+const getManilaDateKey = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: PHILIPPINE_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const value = (type) => parts.find((part) => part.type === type)?.value || "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+};
+
+const getAppointmentQueueDate = (item) => {
+  if (typeof item?.queueDate === "string" && item.queueDate) {
+    return item.queueDate;
+  }
+  const approvedAt = item?.approvedAt;
+  const date = typeof approvedAt?.toDate === "function"
+    ? approvedAt.toDate()
+    : typeof approvedAt?.seconds === "number"
+      ? new Date(approvedAt.seconds * 1000)
+      : approvedAt instanceof Date
+        ? approvedAt
+        : approvedAt ? new Date(approvedAt) : null;
+  return date && !Number.isNaN(date.getTime())
+    ? getManilaDateKey(date)
+    : null;
+};
+
+const isTicketForDay = (item, dateKey) =>
+  getAppointmentQueueDate(item) === dateKey;
+
+
 
 const publicTicket = (item, status, queueNumber) => ({
   appointmentId: item.id,
@@ -69,6 +120,23 @@ const getTimestamp = (item) => {
     return Date.parse(value) || 0;
   return 0;
 };
+
+// Display the student's actual reason separately from the selected service.
+// This field is read from each appointment's Firestore `reason` property.
+function ReasonForVisit({ item, className = "" }) {
+  const reason = typeof item?.reason === "string" ? item.reason.trim() : "";
+
+  return (
+    <div className={`w-full min-w-0 rounded-lg border border-blue-100 bg-blue-50/70 p-3 text-left ${className}`}>
+      <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-blue-700">
+        Reason for Visit
+      </p>
+      <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-700">
+        {reason || "No reason provided"}
+      </p>
+    </div>
+  );
+}
 
 // Declared outside Swds to satisfy react-hooks/static-components.
 function ViewPriorityImage({
@@ -148,6 +216,8 @@ function PendingCard({
         </div>
       </div>
 
+      <ReasonForVisit item={item} />
+
       <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-amber-200/50">
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800">
           <Clock3 className="w-3 h-3" />
@@ -173,6 +243,15 @@ export default function Swds({
   setSelectedImage,
 }) {
   const officeName = OFFICE_NAME;
+  const [todayKey, setTodayKey] = useState(() => getManilaDateKey());
+
+  // Refresh the visible queue after midnight, even if the page stays open.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTodayKey(getManilaDateKey());
+    }, 15000);
+    return () => clearInterval(interval);
+  }, []);
 
   const [appointmentToReject, setAppointmentToReject] =
     useState(null);
@@ -182,6 +261,13 @@ export default function Swds({
   const [processingId, setProcessingId] = useState(null);
   const [actionError, setActionError] = useState("");
   const [actionSuccess, setActionSuccess] = useState("");
+  const [showWalkInModal, setShowWalkInModal] = useState(false);
+  const [walkInName, setWalkInName] = useState("");
+  const [walkInService, setWalkInService] = useState("");
+  const [walkInReason, setWalkInReason] = useState("");
+  const [walkInPriority, setWalkInPriority] = useState(false);
+  const [walkInSaving, setWalkInSaving] = useState(false);
+  const [walkInError, setWalkInError] = useState("");
 
   const officeAppointments = (appointments || []).filter(
     (item) =>
@@ -219,6 +305,7 @@ export default function Swds({
       (item) =>
         item.isPriority &&
         isApproved(item) &&
+        isTicketForDay(item, todayKey) &&
         item.queueNumber
     )
     .sort((a, b) => getTimestamp(a) - getTimestamp(b));
@@ -228,12 +315,13 @@ export default function Swds({
       (item) =>
         !item.isPriority &&
         isApproved(item) &&
+        isTicketForDay(item, todayKey) &&
         item.queueNumber
     )
     .sort((a, b) => getTimestamp(a) - getTimestamp(b));
 
   const currentServing =
-    validAppointments.find(isServing) || null;
+    validAppointments.find((item) => isServing(item) && isTicketForDay(item, todayKey)) || null;
 
   const upcomingQueue = [
     ...approvedPriority,
@@ -243,6 +331,102 @@ export default function Swds({
   const clearMessages = () => {
     setActionError("");
     setActionSuccess("");
+  };
+
+  // Walk-ins join the same daily SWDS queue as approved online appointments.
+  // The shared counter and public queue are updated in one Firestore transaction.
+  const handleRegisterWalkIn = async (event) => {
+    event.preventDefault();
+    if (walkInSaving || processingId) return;
+    const name = walkInName.trim();
+    const service = walkInService.trim();
+    const reason = walkInReason.trim();
+    if (!name || !service) {
+      setWalkInError("Student name and service are required.");
+      return;
+    }
+    if (name.length > 120 || service.length > 150 || reason.length > 500) {
+      setWalkInError("Please shorten the information entered.");
+      return;
+    }
+    const staff = auth.currentUser;
+    if (!staff) {
+      setWalkInError("Your session has expired. Please log in again.");
+      return;
+    }
+    setWalkInSaving(true);
+    setWalkInError("");
+    clearMessages();
+    try {
+      const appointmentRef = doc(collection(db, "appointments"));
+      const counterRef = doc(db, "queue-counters", officeName);
+      const publicQueueRef = doc(db, PUBLIC_QUEUE_COLLECTION, officeName);
+      const queueNumber = await runTransaction(db, async (transaction) => {
+        const counterSnapshot = await transaction.get(counterRef);
+        const publicSnapshot = await transaction.get(publicQueueRef);
+        const dateKey = getManilaDateKey();
+        const counterData = counterSnapshot.exists() ? counterSnapshot.data() : {};
+        const lastNumber = counterData.queueDate === dateKey
+          ? Number(counterData.lastNumber || 0) : 0;
+        const highestToday = Math.max(0, ...officeAppointments
+          .filter((item) => isTicketForDay(item, dateKey))
+          .map((item) => {
+            const match = String(item.queueNumber || "").match(/^SWDS-?(\d+)$/i);
+            return match ? Number(match[1]) : 0;
+          }));
+        const nextNumber = Math.max(lastNumber, highestToday) + 1;
+        const number = `SWDS-${String(nextNumber).padStart(3, "0")}`;
+        const walkIn = {
+          office: officeName,
+          userName: name,
+          service,
+          reason,
+          status: "approved",
+          source: "walk-in",
+          bookingType: "walk-in",
+          isWalkIn: true,
+          isPriority: walkInPriority,
+          queueNumber: number,
+          queuePosition: nextNumber,
+          queueDate: dateKey,
+          createdAt: serverTimestamp(),
+          approvedAt: serverTimestamp(),
+          approvedBy: staff.uid,
+          approvedByEmail: staff.email || "",
+          registeredBy: staff.uid,
+          registeredByEmail: staff.email || "",
+        };
+        const publicData = publicSnapshot.exists() ? publicSnapshot.data() : {};
+        const sameDay = publicData.queueDate === dateKey;
+        const tickets = sameDay ? readTickets(publicData) : [];
+        transaction.set(counterRef, {
+          office: officeName,
+          queueDate: dateKey,
+          lastNumber: nextNumber,
+          updatedAt: serverTimestamp(),
+        }, { merge: true });
+        transaction.set(appointmentRef, walkIn);
+        transaction.set(publicQueueRef, {
+          office: officeName,
+          queueDate: dateKey,
+          nowServing: sameDay ? (publicData.nowServing || "") : "",
+          tickets: [...tickets, publicTicket({ ...walkIn, id: appointmentRef.id }, "approved", number)],
+          updatedAt: serverTimestamp(),
+        }, { merge: true });
+        return number;
+      });
+      setShowWalkInModal(false);
+      setWalkInName("");
+      setWalkInService("");
+      setWalkInReason("");
+      setWalkInPriority(false);
+      setActionSuccess(`Walk-in registered. Queue number ${queueNumber} assigned.`);
+    } catch (error) {
+      console.error("Failed to register walk-in:", error);
+      setWalkInError(error?.message || "Failed to register walk-in. Check Firestore permissions.");
+    } finally {
+      setWalkInSaving(false);
+    }
   };
 
   // Staff accepts booking. Only now is a queue number created.
@@ -311,47 +495,50 @@ export default function Swds({
             );
           }
 
-          const existingNumbers = officeAppointments
-            .filter((appointment) => appointment.id !== item.id)
-            .map((appointment) => {
-              const raw = String(
-                appointment.queueNumber || ""
-              );
-              const match = raw.match(/(\d+)$/);
-              return match ? Number(match[1]) : 0;
-            });
+          // Use a per-day counter inside the transaction. The transaction
+          // retries safely if another staff member accepts simultaneously.
+          const dateKey = getManilaDateKey();
+          const counterData = counterSnapshot.exists()
+            ? counterSnapshot.data()
+            : {};
+          const sameDayCounter = counterData.queueDate === dateKey
+            ? Number(counterData.lastNumber || 0)
+            : 0;
 
-          const highestExisting = Math.max(
+          // Migration safety: include today's already-approved appointments
+          // when upgrading from the old counter schema.
+          const highestToday = Math.max(
             0,
-            ...existingNumbers
+            ...officeAppointments
+              .filter((appointment) =>
+                appointment.id !== item.id &&
+                isTicketForDay(appointment, dateKey)
+              )
+              .map((appointment) => {
+                const match = String(appointment.queueNumber || "")
+                  .match(/^SWDS-?(\d+)$/i);
+                return match ? Number(match[1]) : 0;
+              })
           );
+          const nextNumber = Math.max(sameDayCounter, highestToday) + 1;
+          const queueNumber = `SWDS-${String(nextNumber).padStart(3, "0")}`;
 
-          const storedCounter = Number(
-            counterSnapshot.exists()
-              ? counterSnapshot.data().lastNumber || 0
-              : 0
-          );
+          transaction.set(counterRef, {
+            office: officeName,
+            queueDate: dateKey,
+            lastNumber: nextNumber,
+            updatedAt: serverTimestamp(),
+          }, { merge: true });
 
-          const nextNumber =
-            Math.max(storedCounter, highestExisting) + 1;
-
-          const queueNumber = `SWDS-${String(
-            nextNumber
-          ).padStart(3, "0")}`;
-
-          transaction.set(
-            counterRef,
-            {
-              office: officeName,
-              lastNumber: nextNumber,
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
-
-          const tickets = readTickets(publicSnapshot.data());
+          const publicData = publicSnapshot.exists()
+            ? publicSnapshot.data()
+            : {};
+          const sameDayPublicQueue = publicData.queueDate === dateKey;
+          const tickets = sameDayPublicQueue ? readTickets(publicData) : [];
           transaction.set(publicQueueRef, {
             office: officeName,
+            queueDate: dateKey,
+            nowServing: sameDayPublicQueue ? (publicData.nowServing || "") : "",
             tickets: [
               ...withoutTicket(tickets, item.id),
               publicTicket({ ...appointmentData, id: item.id, queuePosition: nextNumber }, "approved", queueNumber),
@@ -363,6 +550,7 @@ export default function Swds({
             status: "approved",
             queueNumber,
             queuePosition: nextNumber,
+            queueDate: dateKey,
             approvedAt: serverTimestamp(),
             approvedBy: currentStaff.uid,
             approvedByEmail: currentStaff.email || "",
@@ -439,8 +627,13 @@ export default function Swds({
 
         if (getStatus(data) !== "approved") {
           throw new Error(
-            "Only approved appointments can be served."
+            "Only approved appointments or registered walk-ins can be served."
           );
+        }
+
+        const dateKey = getManilaDateKey();
+        if (!isTicketForDay(data, dateKey)) {
+          throw new Error("This ticket belongs to a previous day and cannot be served today.");
         }
 
         if (!data.queueNumber) {
@@ -450,12 +643,14 @@ export default function Swds({
         }
 
         const publicData = publicSnapshot.data() || {};
-        if (publicData.nowServing && publicData.nowServing !== data.queueNumber) {
+        const sameDayPublicQueue = publicData.queueDate === dateKey;
+        if (sameDayPublicQueue && publicData.nowServing && publicData.nowServing !== data.queueNumber) {
           throw new Error("Another ticket is currently being served.");
         }
-        const tickets = readTickets(publicData);
+        const tickets = sameDayPublicQueue ? readTickets(publicData) : [];
         transaction.set(publicQueueRef, {
           office: officeName,
+          queueDate: dateKey,
           nowServing: data.queueNumber,
           tickets: [
             ...withoutTicket(tickets, item.id),
@@ -504,9 +699,13 @@ export default function Swds({
       await runTransaction(db, async (transaction) => {
         const publicSnapshot = await transaction.get(publicQueueRef);
         const publicData = publicSnapshot.data() || {};
+        const sameDay = publicData.queueDate === getManilaDateKey();
+        const matchingServingTicket = readTickets(publicData).some(
+          (ticket) => ticket.appointmentId === item.id && ticket.queueNumber === publicData.nowServing
+        );
         transaction.set(publicQueueRef, {
           office: officeName,
-          nowServing: publicData.nowServing === item.queueNumber ? "" : (publicData.nowServing || ""),
+          nowServing: sameDay && matchingServingTicket ? "" : (publicData.nowServing || ""),
           tickets: withoutTicket(readTickets(publicData), item.id),
           updatedAt: serverTimestamp(),
         }, { merge: true });
@@ -646,7 +845,10 @@ export default function Swds({
         const publicData = publicSnapshot.data() || {};
         transaction.set(publicQueueRef, {
           office: officeName,
-          nowServing: publicData.nowServing === appointmentData.queueNumber ? "" : (publicData.nowServing || ""),
+          nowServing: publicData.queueDate === getManilaDateKey() &&
+            readTickets(publicData).some((ticket) =>
+              ticket.appointmentId === appointmentId && ticket.queueNumber === publicData.nowServing
+            ) ? "" : (publicData.nowServing || ""),
           tickets: withoutTicket(readTickets(publicData), appointmentId),
           updatedAt: serverTimestamp(),
         }, { merge: true });
@@ -671,6 +873,20 @@ export default function Swds({
 
   return (
     <>
+      {/* Walk-in registration trigger */}
+      <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-blue-200 bg-blue-50/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 text-sm font-bold text-slate-900">
+            <UserPlus className="h-5 w-5 text-blue-600" /> Walk-In Registration ({officeName})
+          </h2>
+          <p className="mt-1 text-xs text-slate-600">Register students without online appointments and assign a queue number immediately.</p>
+        </div>
+        <button type="button" onClick={() => { setWalkInError(""); setShowWalkInModal(true); }}
+          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">
+          <UserPlus className="h-4 w-4" /> Add Walk-In
+        </button>
+      </div>
+
       {/* Action feedback */}
       {actionError && (
         <div
@@ -730,6 +946,8 @@ export default function Swds({
                     {currentServing.service ||
                       currentServing.reason}
                   </span>
+
+                  <ReasonForVisit item={currentServing} className="mt-3" />
 
                   {currentServing.isPriority && (
                     <div className="mt-3 mb-1 flex flex-col items-center gap-2">
@@ -871,7 +1089,7 @@ export default function Swds({
             </div>
 
             <p className="text-xs text-slate-500 mb-4">
-              Only accepted appointments with assigned queue
+              Approved online appointments and registered walk-ins with assigned queue
               numbers appear here.
             </p>
 
@@ -943,6 +1161,8 @@ export default function Swds({
                       </div>
                     </div>
 
+                    <ReasonForVisit item={item} />
+
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/60">
                       <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
                         Approved - Waiting
@@ -986,6 +1206,73 @@ export default function Swds({
           </div>
         </div>
       </div>
+
+      {/* Walk-in registration modal */}
+      {showWalkInModal && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm"
+          role="presentation" onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !walkInSaving) setShowWalkInModal(false);
+          }}>
+          <form onSubmit={handleRegisterWalkIn} role="dialog" aria-modal="true"
+            aria-labelledby="swds-walkin-title"
+            className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl sm:p-6">
+            <div className="mb-5 flex items-start justify-between gap-3">
+              <div>
+                <h2 id="swds-walkin-title" className="flex items-center gap-2 text-lg font-bold text-slate-900">
+                  <UserPlus className="h-5 w-5 text-blue-600" /> Register Walk-In
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">SWDS • Queue number assigned automatically upon registration.</p>
+              </div>
+              <button type="button" aria-label="Close walk-in registration" disabled={walkInSaving}
+                onClick={() => setShowWalkInModal(false)} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-50">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="walkin-name" className="mb-1.5 block text-sm font-semibold text-slate-700">Student Name *</label>
+                <input id="walkin-name" required maxLength={120} value={walkInName}
+                  onChange={(event) => setWalkInName(event.target.value)} disabled={walkInSaving}
+                  placeholder="Enter student's full name"
+                  className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+              </div>
+              <div>
+                <label htmlFor="walkin-service" className="mb-1.5 block text-sm font-semibold text-slate-700">SWDS Service *</label>
+                <select id="walkin-service" required value={walkInService}
+                  onChange={(event) => setWalkInService(event.target.value)} disabled={walkInSaving}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100">
+                  <option value="">Select service</option>
+                  {SWDS_SERVICES.map((service) => (
+                    <option key={service} value={service}>{service}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="walkin-reason" className="mb-1.5 block text-sm font-semibold text-slate-700">Reason for Visit</label>
+                <textarea id="walkin-reason" rows={3} maxLength={500} value={walkInReason}
+                  onChange={(event) => setWalkInReason(event.target.value)} disabled={walkInSaving}
+                  placeholder="Optional additional details"
+                  className="w-full resize-none rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+              </div>
+              <label className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-slate-700">
+                <input type="checkbox" checked={walkInPriority} onChange={(event) => setWalkInPriority(event.target.checked)} disabled={walkInSaving}
+                  className="h-4 w-4 accent-amber-600" />
+                Priority lane (eligible PWD / senior citizen)
+              </label>
+              {walkInError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-xs font-medium text-rose-700">{walkInError}</p>}
+            </div>
+            <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button type="button" disabled={walkInSaving} onClick={() => setShowWalkInModal(false)}
+                className="rounded-xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancel</button>
+              <button type="submit" disabled={walkInSaving || !walkInName.trim() || !walkInService}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">
+                {walkInSaving && <Loader2 className="h-4 w-4 animate-spin" />}
+                {walkInSaving ? "Registering..." : "Register & Assign Queue"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* Rejection Reason Modal */}
       {appointmentToReject && (
@@ -1073,6 +1360,7 @@ export default function Swds({
                       "N/A"}
                   </span>
                 </div>
+                <ReasonForVisit item={appointmentToReject} className="mt-3" />
                 <div className="flex justify-between gap-3">
                   <span className="text-xs text-slate-500">
                     Status
