@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from 'react';
 import {
   collection,
@@ -37,6 +36,10 @@ const normalizeStatus = (status) =>
     .trim()
     .toLowerCase()
     .replace(/[\s_-]+/g, '');
+
+// Normalize queue number strings consistently.
+const normalizeQueueNumber = (value) =>
+  String(value || '').trim();
 
 // Check whether an appointment is currently being served.
 // UPDATED: SWDS staff uses "in-progress".
@@ -82,8 +85,8 @@ const getTimestamp = (value) => {
 
 // Sort queue numbers naturally.
 const compareQueueNumbers = (a, b) =>
-  String(a.queueNumber || '').localeCompare(
-    String(b.queueNumber || ''),
+  normalizeQueueNumber(a?.queueNumber).localeCompare(
+    normalizeQueueNumber(b?.queueNumber),
     undefined,
     {
       numeric: true,
@@ -97,13 +100,16 @@ const normalizePublicTicket = (ticket) => {
     return null;
   }
 
+  const normalizedQueueNumber = normalizeQueueNumber(
+    ticket.queueNumber || ticket.ticketNumber || ''
+  );
+
   return {
     ...ticket,
-    id: ticket.appointmentId || ticket.id || '',
-    queueNumber: String(
-      ticket.queueNumber || ticket.ticketNumber || ''
-    ).trim(),
-    status: ticket.status || '',
+    id: ticket.appointmentId || ticket.id || normalizedQueueNumber || '',
+    appointmentId: ticket.appointmentId || ticket.id || '',
+    queueNumber: normalizedQueueNumber,
+    status: ticket.status || 'waiting',
     queuePosition: Number(ticket.queuePosition || 0)
   };
 };
@@ -138,7 +144,12 @@ function SWDSQueueMonitor() {
         const appointments = snapshot.docs.map(
           (document) => ({
             ...document.data(),
-            id: document.id
+            id: document.id,
+            queueNumber: normalizeQueueNumber(
+              document.data()?.queueNumber ||
+                document.data()?.ticketNumber ||
+                ''
+            )
           })
         );
 
@@ -212,7 +223,8 @@ function SWDSQueueMonitor() {
     appointmentsError || publicQueueError;
 
   // Read the public tickets written by the staff dashboard.
-  const publicTickets = Array.isArray(publicQueue?.tickets)
+  const hasPublicTicketsArray = Array.isArray(publicQueue?.tickets);
+  const publicTickets = hasPublicTicketsArray
     ? publicQueue.tickets
         .map(normalizePublicTicket)
         .filter(Boolean)
@@ -223,16 +235,20 @@ function SWDSQueueMonitor() {
   const findAppointmentForTicket = (ticket) => {
     if (!ticket) return null;
 
+    const ticketQueueNum = normalizeQueueNumber(ticket.queueNumber);
+
     return (
       queueAppointments.find(
         (appointment) =>
-          appointment.id === ticket.appointmentId ||
-          appointment.id === ticket.id
+          (ticket.appointmentId &&
+            appointment.id === ticket.appointmentId) ||
+          (ticket.id && appointment.id === ticket.id)
       ) ||
       queueAppointments.find(
         (appointment) =>
-          String(appointment.queueNumber || '').trim() ===
-          ticket.queueNumber
+          ticketQueueNum !== '' &&
+          normalizeQueueNumber(appointment.queueNumber) ===
+            ticketQueueNum
       ) ||
       null
     );
@@ -246,21 +262,32 @@ function SWDSQueueMonitor() {
       ...(appointment || {}),
       ...ticket,
       userName:
-        appointment?.userName ||
         ticket.userName ||
+        ticket.studentName ||
+        appointment?.userName ||
+        appointment?.studentName ||
         '',
       service:
-        appointment?.service ||
         ticket.service ||
+        ticket.serviceName ||
+        appointment?.service ||
+        appointment?.serviceName ||
         '',
       reason:
-        appointment?.reason ||
         ticket.reason ||
+        ticket.visitReason ||
+        appointment?.reason ||
+        appointment?.visitReason ||
         '',
-      queueNumber:
+      queueNumber: normalizeQueueNumber(
         ticket.queueNumber ||
-        appointment?.queueNumber ||
-        ''
+          appointment?.queueNumber ||
+          ''
+      ),
+      isPriority:
+        typeof ticket.isPriority === 'boolean'
+          ? ticket.isPriority
+          : Boolean(appointment?.isPriority)
     };
   };
 
@@ -269,9 +296,7 @@ function SWDSQueueMonitor() {
     .filter(
       (appointment) =>
         isServing(appointment.status) &&
-        String(
-          appointment.queueNumber || ''
-        ).trim() !== ''
+        normalizeQueueNumber(appointment.queueNumber) !== ''
     )
     .sort((a, b) => {
       const aTime = getTimestamp(
@@ -286,22 +311,23 @@ function SWDSQueueMonitor() {
     });
 
   // Read the authoritative nowServing value from queues/SWDS.
-  const publicNowServing = String(
+  const publicNowServing = normalizeQueueNumber(
     publicQueue?.nowServing || ''
-  ).trim();
+  );
 
   // Find the corresponding appointment or public ticket.
   const publicServingTicket = publicNowServing
     ? publicTickets.find(
         (ticket) =>
-          ticket.queueNumber === publicNowServing
+          normalizeQueueNumber(ticket.queueNumber) ===
+          publicNowServing
       )
     : null;
 
   const publicServingAppointment = publicNowServing
     ? queueAppointments.find(
         (appointment) =>
-          String(appointment.queueNumber || '').trim() ===
+          normalizeQueueNumber(appointment.queueNumber) ===
           publicNowServing
       )
     : null;
@@ -313,58 +339,91 @@ function SWDSQueueMonitor() {
         ...(publicServingAppointment || {}),
         ...(publicServingTicket || {}),
         userName:
-          publicServingAppointment?.userName ||
           publicServingTicket?.userName ||
+          publicServingTicket?.studentName ||
+          publicServingAppointment?.userName ||
+          publicServingAppointment?.studentName ||
           '',
         service:
-          publicServingAppointment?.service ||
           publicServingTicket?.service ||
+          publicServingTicket?.serviceName ||
+          publicServingAppointment?.service ||
+          publicServingAppointment?.serviceName ||
           '',
         reason:
-          publicServingAppointment?.reason ||
           publicServingTicket?.reason ||
+          publicServingTicket?.visitReason ||
+          publicServingAppointment?.reason ||
+          publicServingAppointment?.visitReason ||
           '',
         queueNumber: publicNowServing
       }
     : servingAppointments[0] || null;
+
+  const currentServingQueueNumber = normalizeQueueNumber(
+    currentServing?.queueNumber || ''
+  );
 
   // Approved appointments with assigned queue numbers.
   const appointmentWaiting = queueAppointments
     .filter(
       (appointment) =>
         isWaiting(appointment.status) &&
-        String(
-          appointment.queueNumber || ''
-        ).trim() !== '' &&
+        normalizeQueueNumber(appointment.queueNumber) !== '' &&
         !isServing(appointment.status)
     )
+    .map((appointment) => ({
+      ...appointment,
+      queueNumber: normalizeQueueNumber(appointment.queueNumber)
+    }))
     .sort(compareQueueNumbers);
 
   // Public tickets which are waiting to be served.
   const publicWaiting = publicTickets
-    .filter(
-      (ticket) =>
-        isWaiting(ticket.status) &&
-        ticket.queueNumber !== '' &&
-        ticket.queueNumber !== currentServing?.queueNumber
-    )
+    .filter((ticket) => {
+      const ticketQueueNum = normalizeQueueNumber(ticket.queueNumber);
+      const normalizedTicketStatus = normalizeStatus(ticket.status);
+      const isExplicitlyNonWaiting = [
+        'completed',
+        'complete',
+        'done',
+        'cancelled',
+        'canceled',
+        'rejected',
+        'declined',
+        'noshow',
+        'served',
+        'serving',
+        'nowserving',
+        'inservice',
+        'inprogress'
+      ].includes(normalizedTicketStatus);
+
+      return (
+        ticketQueueNum !== '' &&
+        ticketQueueNum !== currentServingQueueNumber &&
+        !isExplicitlyNonWaiting &&
+        (!ticket.status || isWaiting(ticket.status))
+      );
+    })
     .map(enrichTicket);
 
-  // Merge both sources without duplicating queue numbers.
-  // The public queue takes priority when it has a ticket.
+  // Use public queue tickets as the authoritative waiting queue when
+  // queues/SWDS is actively publishing tickets; otherwise fall back to
+  // waiting appointments so legacy/fallback setups still work.
+  const shouldUsePublicWaitingOnly =
+    Boolean(publicQueue) &&
+    (hasPublicTicketsArray || Boolean(publicNowServing));
+
   const waitingMap = new Map();
 
-  appointmentWaiting.forEach((appointment) => {
-    if (
-      appointment.queueNumber !==
-      currentServing?.queueNumber
-    ) {
-      waitingMap.set(
-        appointment.queueNumber,
-        appointment
-      );
-    }
-  });
+  if (!shouldUsePublicWaitingOnly) {
+    appointmentWaiting.forEach((appointment) => {
+      if (appointment.queueNumber !== currentServingQueueNumber) {
+        waitingMap.set(appointment.queueNumber, appointment);
+      }
+    });
+  }
 
   publicWaiting.forEach((ticket) => {
     const previous = waitingMap.get(ticket.queueNumber);
@@ -405,6 +464,9 @@ function SWDSQueueMonitor() {
     if (aPosition > 0 && bPosition > 0) {
       return aPosition - bPosition;
     }
+
+    if (aPosition > 0) return -1;
+    if (bPosition > 0) return 1;
 
     return compareQueueNumbers(a, b);
   });

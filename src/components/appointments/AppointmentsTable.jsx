@@ -10,7 +10,12 @@ import {
   QrCode,
   X,
   Smartphone,
-  ExternalLink
+  ExternalLink,
+  Footprints,
+  Globe,
+  ArrowUpDown,
+  Trash2,
+  ChevronDown
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -18,38 +23,169 @@ import {
   collection,
   query,
   where,
-  getDocs
+  getDocs,
+  deleteDoc,
+  doc
 } from 'firebase/firestore';
 import { auth, db } from '../../services/firebase.js';
 
 const ADMIN_EMAIL = 'qsystemssu123@gmail.com';
 
+// Parse Firestore Timestamp, Date, ISO string, or date/time fields into milliseconds.
+const getAppointmentMillis = (appointment) => {
+  if (!appointment || typeof appointment !== 'object') {
+    return 0;
+  }
+
+  const parseTimestampField = (val) => {
+    if (!val) return 0;
+    if (typeof val.toMillis === 'function') return val.toMillis();
+    if (typeof val.toDate === 'function') return val.toDate().getTime();
+    if (typeof val.seconds === 'number') return val.seconds * 1000;
+    if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
+
+    const parsed = new Date(val).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const rawDate = String(
+    appointment.appointmentDate || appointment.queueDate || ''
+  ).trim();
+
+  const rawTime = String(appointment.appointmentTime || '').trim();
+
+  if (rawDate) {
+    const combined = rawTime ? `${rawDate} ${rawTime}` : rawDate;
+    const parsedCombined = new Date(combined).getTime();
+
+    if (Number.isFinite(parsedCombined) && parsedCombined > 0) {
+      return parsedCombined;
+    }
+
+    const parsedDateOnly = new Date(rawDate).getTime();
+
+    if (Number.isFinite(parsedDateOnly) && parsedDateOnly > 0) {
+      return parsedDateOnly;
+    }
+  }
+
+  const createdMs = parseTimestampField(appointment.createdAt);
+  if (createdMs > 0) return createdMs;
+
+  const approvedMs = parseTimestampField(appointment.approvedAt);
+  if (approvedMs > 0) return approvedMs;
+
+  return 0;
+};
+
+// Determine whether an appointment is walk-in or online.
+const getBookingMode = (appointment) => {
+  if (!appointment || typeof appointment !== 'object') {
+    return 'online';
+  }
+
+  if (appointment.isWalkIn === true) {
+    return 'walk-in';
+  }
+
+  const rawType = String(
+    appointment.bookingType ||
+      appointment.source ||
+      appointment.channel ||
+      appointment.type ||
+      ''
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-');
+
+  if (
+    rawType === 'walk-in' ||
+    rawType === 'walkin' ||
+    rawType.includes('walk')
+  ) {
+    return 'walk-in';
+  }
+
+  if (
+    rawType === 'online' ||
+    rawType === 'web' ||
+    rawType === 'mobile' ||
+    rawType === 'app' ||
+    rawType.includes('online')
+  ) {
+    return 'online';
+  }
+
+  if (
+    appointment.registeredBy ||
+    appointment.registeredByEmail
+  ) {
+    return 'walk-in';
+  }
+
+  return 'online';
+};
+
 export default function AppointmentsTable({
   filteredAppointments = [],
-  searchTerm = '',
+  searchTerm,
   setSearchTerm,
-
-  // Preserve existing props and feedback functionality.
   ...tableOptions
 }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [staffOffice, setStaffOffice] = useState(null);
   const [accessLoading, setAccessLoading] = useState(true);
 
-  // Existing feedback button states.
+  // Internal search state.
+  // The previous prop value is tracked to synchronize changed props
+  // without calling setState inside an effect.
+  const [internalSearchState, setInternalSearchState] = useState(() => ({
+    previousSearchTerm: searchTerm,
+    value: searchTerm || ''
+  }));
+
+  // Synchronize internal search state only when the incoming prop changes.
+  if (
+    typeof setSearchTerm !== 'function' &&
+    internalSearchState.previousSearchTerm !== searchTerm
+  ) {
+    setInternalSearchState({
+      previousSearchTerm: searchTerm,
+      value: searchTerm || ''
+    });
+  }
+
+  // Use the parent's search state when available; otherwise use internal state.
+  const activeSearchTerm =
+    typeof setSearchTerm === 'function'
+      ? searchTerm || ''
+      : internalSearchState.value;
+
+  // Sort order.
+  const [sortOrder, setSortOrder] = useState('asc');
+
+  // Delete state.
+  const [deletingId, setDeletingId] = useState(null);
+
+  // Feedback button states.
   const [copiedAction, setCopiedAction] = useState(null);
   const [actionError, setActionError] = useState('');
 
   // QR code modal state.
   const [qrAppointment, setQrAppointment] = useState(null);
 
-  // Existing feedback props.
+  // Dropdown menu state.
+  const [openActionMenuId, setOpenActionMenuId] = useState(null);
+
+  // Existing feedback props and optional custom delete handler.
   const {
     getAppointmentFeedbackLink,
     copyFeedbackReference,
     copyFeedbackLink,
     copyingFeedbackId,
-    feedbackCopyError
+    feedbackCopyError,
+    onDeleteAppointment
   } = tableOptions;
 
   const isAdmin =
@@ -74,9 +210,7 @@ export default function AppointmentsTable({
         return;
       }
 
-      if (
-        user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()
-      ) {
+      if (user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
         setAccessLoading(false);
         return;
       }
@@ -96,9 +230,7 @@ export default function AppointmentsTable({
         if (!staffSnapshot.empty) {
           const staffData = staffSnapshot.docs[0].data();
 
-          const assignedOffice = String(
-            staffData.office || ''
-          )
+          const assignedOffice = String(staffData.office || '')
             .trim()
             .toUpperCase();
 
@@ -107,10 +239,7 @@ export default function AppointmentsTable({
           }
         }
       } catch (error) {
-        console.error(
-          'Failed to load staff access:',
-          error
-        );
+        console.error('Failed to load staff access:', error);
       } finally {
         if (active && currentRequest === requestId) {
           setAccessLoading(false);
@@ -122,10 +251,7 @@ export default function AppointmentsTable({
       auth,
       loadUserAccess,
       (error) => {
-        console.error(
-          'Authentication error:',
-          error
-        );
+        console.error('Authentication error:', error);
 
         if (active) {
           setAccessLoading(false);
@@ -141,8 +267,7 @@ export default function AppointmentsTable({
   }, []);
 
   // Administrator can view all appointments.
-  // Staff can only view appointments from their office.
-  // Office filtering remains active even though the Office column is hidden.
+  // Staff can only view appointments from their assigned office.
   const accessibleAppointments = useMemo(() => {
     if (!currentUser) {
       return [];
@@ -161,9 +286,7 @@ export default function AppointmentsTable({
     }
 
     return appointments.filter((appointment) => {
-      const appointmentOffice = String(
-        appointment?.office || ''
-      )
+      const appointmentOffice = String(appointment?.office || '')
         .trim()
         .toUpperCase();
 
@@ -176,17 +299,22 @@ export default function AppointmentsTable({
     filteredAppointments
   ]);
 
-  // Search functionality.
+  // Search and sorting.
   const displayedAppointments = useMemo(() => {
-    const normalizedSearch = String(searchTerm || '')
+    const normalizedSearch = String(activeSearchTerm || '')
       .trim()
       .toLowerCase();
 
-    if (!normalizedSearch) {
-      return accessibleAppointments;
-    }
+    const filtered = accessibleAppointments.filter((appointment) => {
+      if (!normalizedSearch) {
+        return true;
+      }
 
-    return accessibleAppointments.filter((appointment) => {
+      const mode = getBookingMode(appointment);
+
+      const modeLabel =
+        mode === 'walk-in' ? 'walk in walk-in walkin' : 'online';
+
       const searchableText = [
         appointment?.userName,
         appointment?.userEmail,
@@ -194,7 +322,14 @@ export default function AppointmentsTable({
         appointment?.reason,
         appointment?.queueNumber,
         appointment?.office,
-        appointment?.status
+        appointment?.status,
+        appointment?.bookingType,
+        appointment?.source,
+        appointment?.appointmentDate,
+        appointment?.appointmentTime,
+        appointment?.queueDate,
+        mode,
+        modeLabel
       ]
         .filter(Boolean)
         .map((value) => String(value))
@@ -203,13 +338,78 @@ export default function AppointmentsTable({
 
       return searchableText.includes(normalizedSearch);
     });
+
+    return [...filtered].sort((a, b) => {
+      const timeA = getAppointmentMillis(a);
+      const timeB = getAppointmentMillis(b);
+
+      if (timeA === timeB) {
+        return String(a?.queueNumber || '').localeCompare(
+          String(b?.queueNumber || ''),
+          undefined,
+          { numeric: true, sensitivity: 'base' }
+        );
+      }
+
+      return sortOrder === 'asc'
+        ? timeA - timeB
+        : timeB - timeA;
+    });
   }, [
     accessibleAppointments,
-    searchTerm
+    activeSearchTerm,
+    sortOrder
   ]);
+
+  // Toggle individual appointment action dropdown.
+  const handleToggleActionMenu = (appointmentId) => {
+    setOpenActionMenuId((currentId) =>
+      currentId === appointmentId ? null : appointmentId
+    );
+  };
+
+  // Delete an appointment.
+  const handleDeleteAppointment = async (appointment) => {
+    setOpenActionMenuId(null);
+
+    if (!appointment?.id) {
+      setActionError('Unable to delete appointment: missing document ID.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Are you sure you want to delete appointment ${
+        appointment.queueNumber || appointment.id
+      } for ${appointment.userName || 'this student'}?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setActionError('');
+    setDeletingId(appointment.id);
+
+    try {
+      if (typeof onDeleteAppointment === 'function') {
+        await onDeleteAppointment(appointment);
+      } else {
+        await deleteDoc(doc(db, 'appointments', appointment.id));
+      }
+    } catch (error) {
+      console.error('Failed to delete appointment:', error);
+
+      setActionError(
+        error?.message || 'Unable to delete appointment.'
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   // Copy a personalized feedback link or reference.
   const handleCopyFeedback = async (appointment, action) => {
+    setOpenActionMenuId(null);
     setActionError('');
     setCopiedAction(null);
 
@@ -244,6 +444,7 @@ export default function AppointmentsTable({
 
   // Open QR code modal.
   const handleShowFeedbackQR = (appointment) => {
+    setOpenActionMenuId(null);
     setActionError('');
 
     if (
@@ -257,12 +458,8 @@ export default function AppointmentsTable({
       return;
     }
 
-    if (
-      typeof getAppointmentFeedbackLink !== 'function'
-    ) {
-      setActionError(
-        'Feedback link generation is unavailable.'
-      );
+    if (typeof getAppointmentFeedbackLink !== 'function') {
+      setActionError('Feedback link generation is unavailable.');
       return;
     }
 
@@ -304,6 +501,33 @@ export default function AppointmentsTable({
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [qrAppointment]);
+
+  // Close dropdown when clicking outside or pressing Escape.
+  useEffect(() => {
+    if (!openActionMenuId) {
+      return;
+    }
+
+    const handleOutsideClick = (event) => {
+      if (!event.target.closest('[data-appointment-actions]')) {
+        setOpenActionMenuId(null);
+      }
+    };
+
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') {
+        setOpenActionMenuId(null);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('keydown', handleEscape);
+
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [openActionMenuId]);
 
   // Loading state.
   if (accessLoading) {
@@ -351,9 +575,10 @@ export default function AppointmentsTable({
   return (
     <>
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+
         {/* Appointment Table Header */}
         <div className="p-6 border-b border-slate-100">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             <div>
               <h2 className="text-lg font-black text-slate-900">
                 Live Appointment Queue
@@ -366,18 +591,40 @@ export default function AppointmentsTable({
               </p>
             </div>
 
-            {/* Search Bar */}
-            <div className="flex flex-col sm:flex-row items-center gap-3">
-              <div className="relative w-full sm:w-64">
+            {/* Sort + Search Controls */}
+            <div className="flex flex-wrap items-center gap-2.5">
+
+              {/* Sort Order Dropdown */}
+              <div className="relative inline-flex items-center">
+                <ArrowUpDown className="w-3.5 h-3.5 text-sky-600 absolute left-3 pointer-events-none" />
+
+                <select
+                  value={sortOrder}
+                  onChange={(e) => setSortOrder(e.target.value)}
+                  aria-label="Sort appointments order"
+                  className="pl-8 pr-7 py-2 text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white transition-all cursor-pointer"
+                >
+                  <option value="asc">Oldest → Newest</option>
+                  <option value="desc">Newest → Oldest</option>
+                </select>
+              </div>
+
+              {/* Search Bar */}
+              <div className="relative w-full sm:w-56">
                 <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
 
                 <input
                   type="text"
-                  placeholder="Search user or service..."
-                  value={searchTerm}
+                  placeholder="Search user, service, type..."
+                  value={activeSearchTerm || ''}
                   onChange={(e) => {
                     if (typeof setSearchTerm === 'function') {
                       setSearchTerm(e.target.value);
+                    } else {
+                      setInternalSearchState((previous) => ({
+                        ...previous,
+                        value: e.target.value
+                      }));
                     }
                   }}
                   className="w-full pl-9 pr-4 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white transition-all"
@@ -387,7 +634,7 @@ export default function AppointmentsTable({
           </div>
         </div>
 
-        {/* Feedback copy error */}
+        {/* Feedback copy / action error */}
         {(actionError || feedbackCopyError) && (
           <div className="mx-6 mt-4 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
             <AlertCircle className="h-4 w-4 shrink-0" />
@@ -400,56 +647,33 @@ export default function AppointmentsTable({
           <table className="w-full text-left text-xs text-slate-600">
             <thead className="bg-slate-50/80 text-slate-500 font-semibold border-b border-slate-100">
               <tr>
-                <th className="px-6 py-3.5">
-                  Queue #
-                </th>
-
-                <th className="px-6 py-3.5">
-                  Student / User
-                </th>
-
-                {/* Office column removed from the table display. */}
-
-                <th className="px-6 py-3.5">
-                  Requested Service
-                </th>
-
-                <th className="px-6 py-3.5">
-                  Date & Time
-                </th>
-
-                <th className="px-6 py-3.5">
-                  Status
-                </th>
-
-                {/* Feedback actions */}
-                <th className="px-6 py-3.5">
-                  Actions
-                </th>
+                <th className="px-6 py-3.5">Queue #</th>
+                <th className="px-6 py-3.5">Student / User</th>
+                <th className="px-6 py-3.5">Booking Type</th>
+                <th className="px-6 py-3.5">Requested Service</th>
+                <th className="px-6 py-3.5">Date & Time</th>
+                <th className="px-6 py-3.5">Status</th>
+                <th className="px-6 py-3.5">Actions</th>
               </tr>
             </thead>
 
             <tbody className="divide-y divide-slate-100">
               {displayedAppointments.length > 0 ? (
                 displayedAppointments.map((appt) => {
-                  const statusLower = String(
-                    appt.status || ''
-                  )
+                  const statusLower = String(appt.status || '')
                     .trim()
                     .toLowerCase();
 
-                  const isCompleted =
-                    statusLower === 'completed';
-
-                  const isApproved =
-                    statusLower === 'approved';
-
-                  const isRejected =
-                    statusLower === 'rejected';
+                  const isCompleted = statusLower === 'completed';
+                  const isApproved = statusLower === 'approved';
+                  const isRejected = statusLower === 'rejected';
 
                   const isServing =
                     statusLower === 'serving' ||
                     statusLower === 'in-progress';
+
+                  const bookingMode = getBookingMode(appt);
+                  const isWalkInAppointment = bookingMode === 'walk-in';
 
                   const hasFeedbackReference =
                     typeof appt.feedbackReference === 'string' &&
@@ -464,14 +688,16 @@ export default function AppointmentsTable({
                       ? getAppointmentFeedbackLink(appt)
                       : '';
 
-                  const isCopying =
-                    copyingFeedbackId === appt.id;
+                  const isCopying = copyingFeedbackId === appt.id;
+                  const isDeleting = deletingId === appt.id;
 
                   const linkCopied =
                     copiedAction === `${appt.id}-link`;
 
                   const referenceCopied =
                     copiedAction === `${appt.id}-reference`;
+
+                  const isMenuOpen = openActionMenuId === appt.id;
 
                   return (
                     <tr
@@ -504,14 +730,37 @@ export default function AppointmentsTable({
                             </p>
 
                             <p className="text-[11px] text-slate-400">
-                              {appt.userEmail}
+                              {appt.userEmail ||
+                                (isWalkInAppointment
+                                  ? 'Walk-In Registration'
+                                  : '')}
                             </p>
                           </div>
                         </div>
                       </td>
 
-                      {/* Office table cell removed. Office data remains
-                          available for filtering and the feedback QR modal. */}
+                      {/* Walk-In or Online Type */}
+                      <td className="px-6 py-4">
+                        <span
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border ${
+                            isWalkInAppointment
+                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                              : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                          }`}
+                        >
+                          {isWalkInAppointment ? (
+                            <>
+                              <Footprints className="h-3 w-3 text-amber-700" />
+                              Walk-In
+                            </>
+                          ) : (
+                            <>
+                              <Globe className="h-3 w-3 text-indigo-600" />
+                              Online
+                            </>
+                          )}
+                        </span>
+                      </td>
 
                       {/* Requested Service */}
                       <td className="px-6 py-4 font-medium text-slate-800">
@@ -552,8 +801,6 @@ export default function AppointmentsTable({
                                 ? 'bg-blue-500'
                                 : isRejected
                                 ? 'bg-rose-500'
-                                : isServing
-                                ? 'bg-amber-500'
                                 : 'bg-amber-500'
                             }`}
                           ></span>
@@ -564,75 +811,144 @@ export default function AppointmentsTable({
                         </span>
                       </td>
 
-                      {/* Feedback Actions */}
+                      {/* Selectable Actions Dropdown */}
                       <td className="px-6 py-4">
-                        {isCompleted ? (
-                          hasFeedbackReference && feedbackLink ? (
-                            <div className="flex flex-col gap-2 min-w-[150px]">
-                              {/* Show Feedback QR */}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleShowFeedbackQR(appt)
-                                }
-                                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-[11px] font-bold text-white hover:bg-emerald-700 transition-colors"
-                              >
-                                <QrCode className="h-3.5 w-3.5" />
-                                Show Feedback QR
-                              </button>
+                        <div
+                          className="relative inline-block min-w-[130px]"
+                          data-appointment-actions
+                        >
+                          {/* Dropdown Toggle */}
+                          <button
+                            type="button"
+                            onClick={() => handleToggleActionMenu(appt.id)}
+                            aria-haspopup="menu"
+                            aria-expanded={isMenuOpen}
+                            disabled={isDeleting}
+                            className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border px-3.5 py-2.5 text-xs font-bold transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                              isMenuOpen
+                                ? 'border-sky-300 bg-sky-50 text-sky-700'
+                                : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:border-slate-300'
+                            } disabled:opacity-60`}
+                          >
+                            {isDeleting ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                Deleting...
+                              </>
+                            ) : (
+                              <>
+                                Actions
+                                <ChevronDown
+                                  className={`h-3.5 w-3.5 transition-transform ${
+                                    isMenuOpen ? 'rotate-180' : ''
+                                  }`}
+                                />
+                              </>
+                            )}
+                          </button>
 
-                              {/* Copy Feedback Link */}
+                          {/* Dropdown Menu */}
+                          {isMenuOpen && (
+                            <div
+                              role="menu"
+                              className="absolute right-0 top-full z-50 mt-2 w-52 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl shadow-slate-900/10 animate-in fade-in slide-in-from-top-1 duration-150"
+                            >
+                              {/* Feedback Actions */}
+                              {isCompleted &&
+                              hasFeedbackReference &&
+                              feedbackLink ? (
+                                <>
+                                  {/* Show Feedback QR */}
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() =>
+                                      handleShowFeedbackQR(appt)
+                                    }
+                                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-semibold text-emerald-700 hover:bg-emerald-50 transition-colors"
+                                  >
+                                    <QrCode className="h-4 w-4 shrink-0" />
+                                    Show Feedback QR
+                                  </button>
+
+                                  {/* Copy Feedback Link */}
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() =>
+                                      handleCopyFeedback(appt, 'link')
+                                    }
+                                    disabled={isCopying}
+                                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-semibold text-blue-700 hover:bg-blue-50 transition-colors disabled:opacity-60"
+                                  >
+                                    {isCopying ? (
+                                      <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                                    ) : linkCopied ? (
+                                      <Check className="h-4 w-4 shrink-0" />
+                                    ) : (
+                                      <Link2 className="h-4 w-4 shrink-0" />
+                                    )}
+
+                                    {linkCopied
+                                      ? 'Link Copied!'
+                                      : 'Copy Feedback Link'}
+                                  </button>
+
+                                  {/* Copy Reference */}
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() =>
+                                      handleCopyFeedback(appt, 'reference')
+                                    }
+                                    disabled={isCopying}
+                                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors disabled:opacity-60"
+                                  >
+                                    {referenceCopied ? (
+                                      <Check className="h-4 w-4 shrink-0" />
+                                    ) : (
+                                      <Copy className="h-4 w-4 shrink-0" />
+                                    )}
+
+                                    {referenceCopied
+                                      ? 'Reference Copied!'
+                                      : 'Copy Reference'}
+                                  </button>
+                                </>
+                              ) : (
+                                isCompleted && (
+                                  <div className="px-3 py-2.5 text-[11px] font-medium text-amber-600">
+                                    Feedback reference unavailable
+                                  </div>
+                                )
+                              )}
+
+                              {/* Divider */}
+                              {isCompleted && (
+                                <div className="my-1 border-t border-slate-100"></div>
+                              )}
+
+                              {/* Delete Appointment */}
                               <button
                                 type="button"
+                                role="menuitem"
                                 onClick={() =>
-                                  handleCopyFeedback(appt, 'link')
+                                  handleDeleteAppointment(appt)
                                 }
-                                disabled={isCopying}
-                                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-[11px] font-bold text-white hover:bg-blue-700 transition-colors disabled:opacity-60"
+                                disabled={isDeleting}
+                                className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-rose-700 hover:bg-rose-50 transition-colors disabled:opacity-60"
                               >
-                                {isCopying ? (
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                ) : linkCopied ? (
-                                  <Check className="h-3.5 w-3.5" />
+                                {isDeleting ? (
+                                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                                 ) : (
-                                  <Link2 className="h-3.5 w-3.5" />
+                                  <Trash2 className="h-4 w-4 shrink-0" />
                                 )}
 
-                                {linkCopied
-                                  ? 'Link Copied!'
-                                  : 'Copy Feedback Link'}
-                              </button>
-
-                              {/* Copy Reference */}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleCopyFeedback(appt, 'reference')
-                                }
-                                disabled={isCopying}
-                                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-60"
-                              >
-                                {referenceCopied ? (
-                                  <Check className="h-3.5 w-3.5" />
-                                ) : (
-                                  <Copy className="h-3.5 w-3.5" />
-                                )}
-
-                                {referenceCopied
-                                  ? 'Reference Copied!'
-                                  : 'Copy Reference'}
+                                {isDeleting ? 'Deleting...' : 'Delete'}
                               </button>
                             </div>
-                          ) : (
-                            <span className="text-[11px] text-amber-600 font-medium">
-                              Reference unavailable
-                            </span>
-                          )
-                        ) : (
-                          <span className="text-[11px] text-slate-400">
-                            —
-                          </span>
-                        )}
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -640,12 +956,12 @@ export default function AppointmentsTable({
               ) : (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     className="text-center py-10 text-slate-400"
                   >
                     {isAdmin
-                      ? 'No appointments match the selected search criteria.'
-                      : `No ${staffOffice} appointments match the selected search criteria.`}
+                      ? 'No appointments match your search.'
+                      : `No ${staffOffice} appointments match your search.`}
                   </td>
                 </tr>
               )}
@@ -735,6 +1051,7 @@ export default function AppointmentsTable({
             {/* Scan Instructions */}
             <div className="mt-5 flex items-center justify-center gap-2 text-slate-600">
               <Smartphone className="h-4 w-4 text-sky-600" />
+
               <span className="text-xs font-medium">
                 Open your phone camera and scan the QR code
               </span>
@@ -754,7 +1071,12 @@ export default function AppointmentsTable({
                 disabled={copyingFeedbackId === qrAppointment.id}
                 className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-60"
               >
-                <Copy className="h-4 w-4" />
+                {copyingFeedbackId === qrAppointment.id ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Copy className="h-4 w-4" />
+                )}
+
                 Copy Link
               </button>
 

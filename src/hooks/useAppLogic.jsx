@@ -1,3 +1,4 @@
+
 import { useState, useEffect } from 'react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { auth, db } from '../services/firebase.js';
@@ -6,13 +7,13 @@ import {
   LayoutDashboard,
   Ticket,
   CalendarCheck,
-  Building2,
   Users,
   User,
   ShieldUser,
   Megaphone,
   MessageSquareText,
-  Star
+  Star,
+  BarChart3
 } from 'lucide-react';
 
 export function useAppLogic() {
@@ -165,11 +166,6 @@ export function useAppLogic() {
       icon: CalendarCheck
     },
     {
-      id: 'offices',
-      label: 'SWDS',
-      icon: Building2
-    },
-    {
       id: 'users',
       label: 'Users',
       icon: Users
@@ -195,6 +191,11 @@ export function useAppLogic() {
       icon: Star
     },
     {
+      id: 'performanceReport',
+      label: 'Performance Report',
+      icon: BarChart3
+    },
+    {
       id: 'profile',
       label: 'Profile',
       icon: User
@@ -212,6 +213,7 @@ export function useAppLogic() {
 
     // ADMIN SIDEBAR
     // Queue Control is intentionally excluded from admin navigation.
+    // Performance Report is available to administrators.
     if (adminUser?.role === 'admin') {
       return item.id !== 'queue';
     }

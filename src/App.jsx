@@ -2,13 +2,13 @@
 import Dashboard from './pages/dashboard';
 import QueueControl from './pages/queue.jsx';
 import Appointments from './pages/appointments';
-import Offices from './pages/offices';
 import MobileUsers from './pages/users';
 import Staff from './pages/staff';
 import Profile from './pages/profile.jsx';
 import Feedback from './pages/feedback';
 import Ratings from './pages/ratings';
 import Announcement from './pages/announcement';
+import PerformanceReport from './pages/performanceReport';
 import Login from './pages/login';
 
 // NEW: Public feedback page
@@ -39,7 +39,6 @@ export default function App() {
     adminInitials
   } = useAppLogic();
 
-  // NEW:
   // Public feedback route.
   // This page is accessible without admin/staff login.
   // It does not display the admin sidebar or header.
@@ -51,23 +50,24 @@ export default function App() {
   const isPublicFeedbackPage =
     currentPath === '/public-feedback';
 
-  // IMPORTANT:
   // Public route is checked BEFORE authentication loading,
   // login redirects, and admin dashboard rendering.
   if (isPublicFeedbackPage) {
     return <PublicFeedback />;
   }
 
-  // EXISTING: Authentication loading screen
+  // Authentication loading screen
   if (loadingAuth) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-sky-950 text-white">
-        <p className="text-sm font-medium animate-pulse">Loading...</p>
+        <p className="text-sm font-medium animate-pulse">
+          Loading...
+        </p>
       </div>
     );
   }
 
-  // EXISTING: Login screen
+  // Login screen
   if (!isAuthenticated) {
     return (
       <Login
@@ -87,7 +87,7 @@ export default function App() {
     );
   }
 
-  // EXISTING: Admin and staff page navigation
+  // Admin and staff page navigation
   const renderPage = () => {
     // Extra protection:
     // ADMIN MUST NEVER be able to access Queue Control.
@@ -110,9 +110,6 @@ export default function App() {
       case 'appointments':
         return <Appointments />;
 
-      case 'offices':
-        return <Offices />;
-
       case 'users':
         return <MobileUsers />;
 
@@ -128,6 +125,16 @@ export default function App() {
       case 'ratings':
         return <Ratings />;
 
+      case 'performanceReport':
+        // Performance Report is ADMIN ONLY.
+        if (adminUser?.role !== 'admin') {
+          return adminUser?.role === 'staff'
+            ? <QueueControl />
+            : <Dashboard />;
+        }
+
+        return <PerformanceReport />;
+
       case 'profile':
         return <Profile />;
 
@@ -136,7 +143,7 @@ export default function App() {
     }
   };
 
-  // EXISTING: Main admin dashboard layout
+  // Main admin and staff dashboard layout
   return (
     <div className="flex h-screen bg-sky-50 text-slate-800 font-sans overflow-hidden relative">
       <Sidebar
@@ -165,7 +172,9 @@ export default function App() {
       </div>
 
       {showLogoutModal && (
-        <LogoutModal setShowLogoutModal={setShowLogoutModal} />
+        <LogoutModal
+          setShowLogoutModal={setShowLogoutModal}
+        />
       )}
     </div>
   );
