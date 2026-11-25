@@ -15,7 +15,8 @@ import {
   Globe,
   ArrowUpDown,
   Trash2,
-  ChevronDown
+  ChevronDown,
+  Download
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -76,6 +77,50 @@ const getAppointmentMillis = (appointment) => {
   if (approvedMs > 0) return approvedMs;
 
   return 0;
+};
+
+// Convert Firestore timestamps and other date values into readable CSV values.
+const formatCSVDate = (value) => {
+  if (!value) return '';
+
+  if (typeof value.toDate === 'function') {
+    const date = value.toDate();
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+  }
+
+  if (typeof value.toMillis === 'function') {
+    const date = new Date(value.toMillis());
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+  }
+
+  if (
+    typeof value === 'object' &&
+    typeof value.seconds === 'number'
+  ) {
+    const date = new Date(value.seconds * 1000);
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? '' : value.toISOString();
+  }
+
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+
+  return String(value);
+};
+
+// Escape CSV values and protect spreadsheet applications from formula injection.
+const escapeCSVValue = (value) => {
+  let safeValue = String(value ?? '');
+
+  if (/^[\s]*[=+\-@]/.test(safeValue)) {
+    safeValue = `'${safeValue}`;
+  }
+
+  return `"${safeValue.replace(/"/g, '""')}"`;
 };
 
 // Determine whether an appointment is walk-in or online.
@@ -359,6 +404,106 @@ export default function AppointmentsTable({
     sortOrder
   ]);
 
+  // Export appointment data as CSV.
+  // Only the administrator account is allowed to download data.
+  const handleExportCSV = () => {
+    if (
+      !currentUser ||
+      currentUser.email?.trim().toLowerCase() !== ADMIN_EMAIL.toLowerCase()
+    ) {
+      setActionError(
+        'Access denied. Only the administrator can download appointment data.'
+      );
+      return;
+    }
+
+    if (!Array.isArray(displayedAppointments) || displayedAppointments.length === 0) {
+      setActionError('There are no appointments available to export.');
+      return;
+    }
+
+    try {
+      setActionError('');
+
+      const headers = [
+        'Appointment ID',
+        'Queue Number',
+        'Student Name',
+        'Student Email',
+        'Office',
+        'Booking Type',
+        'Requested Service',
+        'Appointment Date',
+        'Appointment Time',
+        'Status',
+        'Reason',
+        'Rejection Reason',
+        'Registered By',
+        'Registered By Email',
+        'Created At',
+        'Approved At',
+        'Feedback Reference'
+      ];
+
+      const rows = displayedAppointments.map((appointment) => {
+        const bookingMode = getBookingMode(appointment);
+
+        return [
+          appointment.id || '',
+          appointment.queueNumber || '',
+          appointment.userName || '',
+          appointment.userEmail || '',
+          appointment.office || '',
+          bookingMode,
+          appointment.service || '',
+          appointment.appointmentDate || appointment.queueDate || '',
+          appointment.appointmentTime || '',
+          appointment.status || 'waiting',
+          appointment.reason || '',
+          appointment.rejectionReason ||
+            appointment.rejectedReason ||
+            '',
+          appointment.registeredBy || '',
+          appointment.registeredByEmail || '',
+          formatCSVDate(appointment.createdAt),
+          formatCSVDate(appointment.approvedAt),
+          appointment.feedbackReference || ''
+        ];
+      });
+
+      const csvContent = [
+        headers.map(escapeCSVValue).join(','),
+        ...rows.map((row) => row.map(escapeCSVValue).join(','))
+      ].join('\r\n');
+
+      // Add a UTF-8 BOM so spreadsheet applications correctly display text.
+      const csvBlob = new Blob(
+        ['\uFEFF', csvContent],
+        { type: 'text/csv;charset=utf-8;' }
+      );
+
+      const downloadUrl = URL.createObjectURL(csvBlob);
+      const downloadLink = document.createElement('a');
+
+      const dateStamp = new Date().toISOString().slice(0, 10);
+
+      downloadLink.href = downloadUrl;
+      downloadLink.download = `QueueMatrix_Appointments_${dateStamp}.csv`;
+
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+      document.body.removeChild(downloadLink);
+
+      URL.revokeObjectURL(downloadUrl);
+    } catch (error) {
+      console.error('Failed to export appointment data:', error);
+
+      setActionError(
+        error?.message || 'Unable to download appointment data.'
+      );
+    }
+  };
+
   // Toggle individual appointment action dropdown.
   const handleToggleActionMenu = (appointmentId) => {
     setOpenActionMenuId((currentId) =>
@@ -598,8 +743,22 @@ export default function AppointmentsTable({
               </p>
             </div>
 
-            {/* Sort + Search Controls */}
+            {/* Sort + Search + Export Controls */}
             <div className="flex flex-wrap items-center gap-2.5">
+
+              {/* Export CSV - ADMIN ONLY */}
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={handleExportCSV}
+                  disabled={displayedAppointments.length === 0}
+                  title="Download appointment data as CSV"
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition-all hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Download className="h-4 w-4" />
+                  Export CSV
+                </button>
+              )}
 
               {/* Sort Order Dropdown */}
               <div className="relative inline-flex items-center">

@@ -8,7 +8,8 @@ import {
   Building2,
   Power,
   Search,
-  Loader2
+  Loader2,
+  CalendarClock
 } from 'lucide-react';
 import { useAnnouncementData } from '../hooks/useAnnouncementData';
 import { COMMON_REASONS } from '../utils/announcementConstants';
@@ -17,6 +18,23 @@ import {
   AuthRequiredState,
   OfficeAssignmentRequiredState
 } from '../components/announcement/AnnouncementStates';
+
+const formatScheduleDate = (value) => {
+  if (!value) return 'Not set';
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return 'Invalid date';
+
+  return date.toLocaleString('en-PH', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+};
 
 export default function Announcement() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -33,10 +51,11 @@ export default function Announcement() {
     successMessage,
     canControlOffice,
     handleReasonChange,
+    handleScheduleChange,
     handleToggleBooking,
+    handleSaveSchedule,
   } = useAnnouncementData();
 
-  // UPDATED: Only SWDS is displayed.
   const filteredOfficeKeys = ['SWDS'].filter(
     (officeKey) =>
       officeKey.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -70,7 +89,6 @@ export default function Announcement() {
         }
       `}</style>
 
-      {/* PAGE HEADER */}
       <div className="bg-white border border-slate-100 rounded-2xl p-6 shadow-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4 w-full">
         <div className="flex items-start gap-4">
           <div className="w-12 h-12 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center shrink-0 border border-sky-100">
@@ -97,7 +115,6 @@ export default function Announcement() {
         </div>
       </div>
 
-      {/* SUCCESS BANNER TOAST */}
       {successMessage && (
         <div className="bg-emerald-50 text-emerald-900 px-4 py-3.5 rounded-xl border border-emerald-200 text-sm flex items-center gap-3 shadow-xs w-full">
           <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
@@ -107,7 +124,6 @@ export default function Announcement() {
         </div>
       )}
 
-      {/* ACCESS INFORMATION */}
       <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex items-center justify-between gap-4">
         <div>
           <p className="text-xs font-bold text-slate-700">
@@ -128,7 +144,6 @@ export default function Announcement() {
         </span>
       </div>
 
-      {/* MAIN CONTENT CONTAINER */}
       <div className="bg-white border border-slate-200/80 rounded-2xl p-6 shadow-xs space-y-6 w-full">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-slate-100 w-full">
           <div>
@@ -160,7 +175,6 @@ export default function Announcement() {
           </div>
         </div>
 
-        {/* OFFICE CARDS CONTAINER */}
         <div className="grid grid-cols-1 gap-5 w-full">
           {filteredOfficeKeys.length === 0 ? (
             <div className="text-center py-10 text-slate-400 text-sm border border-dashed border-slate-200 rounded-xl">
@@ -368,7 +382,113 @@ export default function Announcement() {
                       </div>
                     </div>
 
-                    <div className="flex justify-end pt-2">
+                    <div className="border-t border-slate-200 pt-4 space-y-4">
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                          <CalendarClock className="w-4 h-4 text-sky-600" />
+                          Booking Unavailability Schedule
+                        </h4>
+
+                        <p className="text-xs text-slate-500 mt-1">
+                          Enter when the office becomes unavailable and when students can book again.
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-xs font-bold text-slate-700">
+                            Unavailable From (Date & Time)
+                          </label>
+
+                          <input
+                            type="datetime-local"
+                            value={office.unavailableFrom}
+                            disabled={isLockedForStaff}
+                            onChange={(e) =>
+                              handleScheduleChange(
+                                officeKey,
+                                'unavailableFrom',
+                                e.target.value
+                              )
+                            }
+                            className={`w-full px-3.5 py-2.5 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                              isLockedForStaff
+                                ? 'border-slate-200 bg-slate-200 text-slate-400 cursor-not-allowed'
+                                : 'border-slate-200 bg-white text-slate-700'
+                            }`}
+                          />
+                        </div>
+
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-xs font-bold text-slate-700">
+                            Booking Available Again (Date & Time)
+                          </label>
+
+                          <input
+                            type="datetime-local"
+                            value={office.resumeAt}
+                            disabled={isLockedForStaff}
+                            min={office.unavailableFrom || undefined}
+                            onChange={(e) =>
+                              handleScheduleChange(
+                                officeKey,
+                                'resumeAt',
+                                e.target.value
+                              )
+                            }
+                            className={`w-full px-3.5 py-2.5 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                              isLockedForStaff
+                                ? 'border-slate-200 bg-slate-200 text-slate-400 cursor-not-allowed'
+                                : 'border-slate-200 bg-white text-slate-700'
+                            }`}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="bg-white border border-sky-100 rounded-xl p-3 space-y-2">
+                        <p className="text-xs font-bold text-slate-700">
+                          Schedule Preview
+                        </p>
+
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs">
+                          <span className="text-slate-500">
+                            Office unavailable:
+                          </span>
+
+                          <span className="font-semibold text-slate-800">
+                            {formatScheduleDate(office.unavailableFrom)}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs">
+                          <span className="text-slate-500">
+                            Booking resumes:
+                          </span>
+
+                          <span className="font-semibold text-emerald-700">
+                            {formatScheduleDate(office.resumeAt)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row justify-end gap-2 pt-2">
+                      {office.isBusy && (
+                        <button
+                          disabled={isThisLoading || isLockedForStaff}
+                          onClick={() => handleSaveSchedule(officeKey)}
+                          className="inline-flex items-center justify-center gap-2 py-2.5 px-5 rounded-xl font-semibold text-xs transition-all border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isThisLoading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <CalendarClock className="w-3.5 h-3.5" />
+                          )}
+
+                          Update Schedule
+                        </button>
+                      )}
+
                       <button
                         disabled={isThisLoading || isLockedForStaff}
                         title={
