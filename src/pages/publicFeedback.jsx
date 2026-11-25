@@ -35,6 +35,7 @@ function getInitialReference() {
   const params = new URLSearchParams(window.location.search);
 
   return (
+    params.get("reference") ||
     params.get("token") ||
     params.get("appointmentId") ||
     params.get("ref") ||
@@ -109,6 +110,10 @@ export default function PublicFeedback() {
   const [selectedAppointment, setSelectedAppointment] =
     useState(null);
 
+  // Stores the exact reference that was successfully verified.
+  const [verifiedReference, setVerifiedReference] =
+    useState("");
+
   const [rating, setRating] = useState(0);
   const [hoverRating, setHoverRating] = useState(0);
   const [feedback, setFeedback] = useState("");
@@ -119,13 +124,20 @@ export default function PublicFeedback() {
   const [error, setError] = useState("");
 
   const handleReferenceChange = (event) => {
-    setAppointmentId(event.target.value);
+    const newReference = event.target.value;
+
+    setAppointmentId(newReference);
+
+    // Changing the reference invalidates the previous verification.
     setSelectedAppointment(null);
+    setVerifiedReference("");
     setError("");
   };
 
   const handleVerifyAppointment = async () => {
-    if (!appointmentId.trim()) {
+    const reference = appointmentId.trim();
+
+    if (!reference) {
       setError("Please enter your appointment reference.");
       return;
     }
@@ -134,11 +146,12 @@ export default function PublicFeedback() {
       setVerifying(true);
       setError("");
       setSelectedAppointment(null);
+      setVerifiedReference("");
 
       const result = await requestFeedbackAPI(
         "/verify",
         {
-          token: appointmentId.trim(),
+          token: reference,
         }
       );
 
@@ -148,8 +161,14 @@ export default function PublicFeedback() {
         );
       }
 
+      // Store both the verified appointment and its exact token.
       setSelectedAppointment(result.appointment);
+      setVerifiedReference(reference);
+      setError("");
     } catch (err) {
+      setSelectedAppointment(null);
+      setVerifiedReference("");
+
       setError(
         err.message ||
         "Unable to verify your appointment."
@@ -163,14 +182,21 @@ export default function PublicFeedback() {
     event.preventDefault();
     setError("");
 
-    if (!appointmentId.trim()) {
+    const reference = appointmentId.trim();
+
+    if (!reference) {
       setError(
         "Please enter your completed appointment reference."
       );
       return;
     }
 
-    if (!selectedAppointment) {
+    // Ensure the appointment was verified using the current reference.
+    if (
+      !selectedAppointment ||
+      !verifiedReference ||
+      verifiedReference !== reference
+    ) {
       setError(
         "Please verify your appointment before submitting."
       );
@@ -193,7 +219,8 @@ export default function PublicFeedback() {
       const result = await requestFeedbackAPI(
         "/submit",
         {
-          token: appointmentId.trim(),
+          // Submit the exact reference that was verified.
+          token: verifiedReference,
           rating,
           reviewText: feedback.trim(),
         }
@@ -219,11 +246,13 @@ export default function PublicFeedback() {
   const resetForm = () => {
     setAppointmentId("");
     setSelectedAppointment(null);
+    setVerifiedReference("");
     setRating(0);
     setHoverRating(0);
     setFeedback("");
     setSubmitted(false);
     setSubmitting(false);
+    setVerifying(false);
     setError("");
   };
 
@@ -334,20 +363,27 @@ export default function PublicFeedback() {
                   maxLength={256}
                   required
                   autoComplete="off"
-                  className="w-full pl-11 pr-4 py-3.5 border border-slate-300 rounded-xl text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-colors"
+                  disabled={verifying || submitting}
+                  className="w-full pl-11 pr-4 py-3.5 border border-slate-300 rounded-xl text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-colors disabled:bg-slate-100"
                 />
               </div>
 
               <button
                 type="button"
                 onClick={handleVerifyAppointment}
-                disabled={verifying || submitting}
+                disabled={verifying || submitting || !appointmentId.trim()}
                 className="mt-3 w-full flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 font-semibold py-3 transition-colors disabled:opacity-60"
               >
                 {verifying ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
                     Verifying Appointment...
+                  </>
+                ) : verifiedReference === appointmentId.trim() &&
+                  selectedAppointment ? (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    Appointment Verified
                   </>
                 ) : (
                   <>
@@ -371,8 +407,9 @@ export default function PublicFeedback() {
             </section>
 
             {/* VERIFIED APPOINTMENT DETAILS */}
-            {selectedAppointment && (
-              <section className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            {selectedAppointment &&
+              verifiedReference === appointmentId.trim() && (
+              <section className="rounded-2xl border border-emerald-200 bg-emerald-50/40 p-4">
                 <div className="flex items-center justify-between gap-2 mb-4">
                   <h3 className="text-sm font-bold text-slate-900">
                     Appointment Details
@@ -380,7 +417,7 @@ export default function PublicFeedback() {
 
                   <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-xs font-bold text-emerald-700">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    COMPLETED
+                    VERIFIED APPOINTMENT
                   </span>
                 </div>
 
@@ -552,7 +589,12 @@ export default function PublicFeedback() {
             {/* SUBMIT */}
             <button
               type="submit"
-              disabled={submitting || verifying}
+              disabled={
+                submitting ||
+                verifying ||
+                !selectedAppointment ||
+                verifiedReference !== appointmentId.trim()
+              }
               className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-bold py-3.5 rounded-xl transition-colors shadow-sm"
             >
               {submitting ? (

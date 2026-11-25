@@ -138,8 +138,6 @@ export default function AppointmentsTable({
   const [accessLoading, setAccessLoading] = useState(true);
 
   // Internal search state.
-  // The previous prop value is tracked to synchronize changed props
-  // without calling setState inside an effect.
   const [internalSearchState, setInternalSearchState] = useState(() => ({
     previousSearchTerm: searchTerm,
     value: searchTerm || ''
@@ -189,7 +187,7 @@ export default function AppointmentsTable({
   } = tableOptions;
 
   const isAdmin =
-    currentUser?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+    currentUser?.email?.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase();
 
   // Load administrator or staff access from Firebase.
   useEffect(() => {
@@ -210,7 +208,7 @@ export default function AppointmentsTable({
         return;
       }
 
-      if (user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+      if (user.email?.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
         setAccessLoading(false);
         return;
       }
@@ -369,8 +367,17 @@ export default function AppointmentsTable({
   };
 
   // Delete an appointment.
+  // Only the administrator account is allowed to execute this action.
   const handleDeleteAppointment = async (appointment) => {
     setOpenActionMenuId(null);
+
+    if (
+      !currentUser ||
+      currentUser.email?.trim().toLowerCase() !== ADMIN_EMAIL.toLowerCase()
+    ) {
+      setActionError('Access denied. Only the administrator can delete appointments.');
+      return;
+    }
 
     if (!appointment?.id) {
       setActionError('Unable to delete appointment: missing document ID.');
@@ -924,28 +931,30 @@ export default function AppointmentsTable({
                               )}
 
                               {/* Divider */}
-                              {isCompleted && (
+                              {isAdmin && isCompleted && (
                                 <div className="my-1 border-t border-slate-100"></div>
                               )}
 
-                              {/* Delete Appointment */}
-                              <button
-                                type="button"
-                                role="menuitem"
-                                onClick={() =>
-                                  handleDeleteAppointment(appt)
-                                }
-                                disabled={isDeleting}
-                                className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-rose-700 hover:bg-rose-50 transition-colors disabled:opacity-60"
-                              >
-                                {isDeleting ? (
-                                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
-                                ) : (
-                                  <Trash2 className="h-4 w-4 shrink-0" />
-                                )}
+                              {/* Delete Appointment - ADMIN ONLY */}
+                              {isAdmin && (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  onClick={() =>
+                                    handleDeleteAppointment(appt)
+                                  }
+                                  disabled={isDeleting}
+                                  className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-rose-700 hover:bg-rose-50 transition-colors disabled:opacity-60"
+                                >
+                                  {isDeleting ? (
+                                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="h-4 w-4 shrink-0" />
+                                  )}
 
-                                {isDeleting ? 'Deleting...' : 'Delete'}
-                              </button>
+                                  {isDeleting ? 'Deleting...' : 'Delete'}
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>

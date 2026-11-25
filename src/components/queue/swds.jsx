@@ -1,5 +1,6 @@
+import { useEffect, useState, useRef } from "react";
+import emailjs from "@emailjs/browser";
 
-import { useEffect, useState } from "react";
 import {
   CheckCircle2,
   XCircle,
@@ -11,33 +12,30 @@ import {
   Loader2,
   Clock3,
   Play,
-  UserPlus,
-  X,
 } from "lucide-react";
+
 import {
   doc,
-  collection,
+  getDoc,
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
-import { auth, db } from "../../services/firebase";
 
-const SWDS_SERVICES = [
-  'Guidance & Counseling Services',
-  'Services for Students with Special Needs & PWDs',
-  'Psychological & Wellness Services',
-  'Information & Orientation Services',
-  'Economic Enterprise Development',
-  'Career & Placement Services / PESO',
-  'Admission & Recruitment Services',
-  'University Student Council',
-  'Student Organizations',
-  'Multi-Faith Services',
-];
+import { auth, db } from "../../services/firebase";
+import WalkIn from "./walk-in";
 
 const OFFICE_NAME = "SWDS";
 const PUBLIC_QUEUE_COLLECTION = "queues";
 const PHILIPPINE_TIME_ZONE = "Asia/Manila";
+const COUNSELING_SERVICE = "Guidance & Counseling Services";
+
+// EmailJS configuration
+const EMAILJS_SERVICE_ID = "service_20wm2tz";
+const EMAILJS_TEMPLATE_ID = "template_f57ki9i";
+const EMAILJS_PUBLIC_KEY = "P8vS1-WoC60N-hGPD";
+
+const FEEDBACK_LINK =
+  "https://qsystem-admin.netlify.app/public-feedback";
 
 // The queue is numbered separately for each Philippine calendar day.
 const getManilaDateKey = (date = new Date()) => {
@@ -47,22 +45,292 @@ const getManilaDateKey = (date = new Date()) => {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(date);
-  const value = (type) => parts.find((part) => part.type === type)?.value || "";
+
+  const value = (type) =>
+    parts.find((part) => part.type === type)?.value || "";
+
   return `${value("year")}-${value("month")}-${value("day")}`;
+};
+
+// Supports both old single-service records and new multiple-service records.
+const getAppointmentServices = (item) => {
+  if (Array.isArray(item?.services)) {
+    return item.services
+      .filter((service) => typeof service === "string")
+      .map((service) => service.trim())
+      .filter(Boolean);
+  }
+
+  if (typeof item?.service === "string" && item.service.trim()) {
+    return item.service
+      .split(",")
+      .map((service) => service.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+const getServiceLabel = (item) => {
+  const services = getAppointmentServices(item);
+
+  return services.length
+    ? services.join(", ")
+    : item?.reason || "Appointment";
+};
+
+// An appointment requires staff confirmation if ANY selected service
+// includes Guidance & Counseling Services.
+const requiresCounselingConfirmation = (item) => {
+  return getAppointmentServices(item).some(
+    (service) =>
+      service.trim().toLowerCase() ===
+      COUNSELING_SERVICE.toLowerCase()
+  );
+};
+
+// Identify walk-in appointments using the available registration markers.
+// Online appointments must never receive the completion email.
+const isWalkInAppointment = (item) => {
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+
+  if (item.isWalkIn === true) {
+    return true;
+  }
+
+  const possibleTypes = [
+    item.source,
+    item.bookingType,
+    item.channel,
+    item.type,
+  ];
+
+  const hasWalkInType = possibleTypes.some((value) => {
+    const normalized = String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_]+/g, "-");
+
+    return (
+      normalized === "walk-in" ||
+      normalized === "walkin" ||
+      normalized.includes("walk-in") ||
+      normalized.includes("walkin")
+    );
+  });
+
+  if (hasWalkInType) {
+    return true;
+  }
+
+  // Walk-in registrations may also identify the staff member
+  // who registered the appointment.
+  if (
+    item.registeredBy ||
+    item.registeredByEmail
+  ) {
+    return true;
+  }
+
+  return false;
+};
+
+// Prioritize the actual email field used by the appointment table.
+const getAppointmentEmail = (item) => {
+  const possibleEmails = [
+    item?.userEmail,
+    item?.email,
+    item?.user?.email,
+    item?.studentEmail,
+  ];
+
+  const email = possibleEmails.find(
+    (value) =>
+      typeof value === "string" &&
+      value.trim().length > 0
+  );
+
+  return email ? email.trim() : "";
+};
+
+// Retrieve the feedback reference saved in the appointment record.
+// feedbackReference is the primary field used by the Appointments Table.
+const getFeedbackReference = (item) => {
+  const possibleReferences = [
+    item?.feedbackReference,
+    item?.feedbackRef,
+    item?.feedbackCode,
+    item?.reference,
+    item?.feedback?.reference,
+    item?.feedback?.feedbackReference,
+    item?.feedback?.feedbackRef,
+    item?.feedback?.code,
+  ];
+
+  const reference = possibleReferences.find(
+    (value) =>
+      typeof value === "string" &&
+      value.trim().length > 0
+  );
+
+  return reference ? reference.trim() : "";
+};
+
+// Validate the reference using the same 48-character format
+// required by the Appointments Table.
+const isValidFeedbackReference = (reference) => {
+  return (
+    typeof reference === "string" &&
+    /^[a-f0-9]{48}$/i.test(reference.trim())
+  );
+};
+
+// Build a personalized feedback URL.
+// The PublicFeedback page expects the reference in the "token" parameter.
+const buildPersonalizedFeedbackLink = (item) => {
+  const reference = getFeedbackReference(item);
+
+  if (!reference) {
+    throw new Error(
+      "The walk-in appointment does not contain a feedbackReference. " +
+      "The appointment must have a generated feedback reference saved " +
+      "in its Firestore record."
+    );
+  }
+
+  if (!isValidFeedbackReference(reference)) {
+    throw new Error(
+      "The appointment has an invalid feedbackReference. " +
+      "The reference must contain exactly 48 hexadecimal characters."
+    );
+  }
+
+  const url = new URL(FEEDBACK_LINK);
+
+  // IMPORTANT: Use token, not reference.
+  // Expected format:
+  // /public-feedback?token=48-character-reference
+  url.searchParams.set("token", reference);
+
+  return url.toString();
+};
+
+// Convert EmailJS errors into readable messages.
+const getEmailJSErrorMessage = (error) => {
+  const status = error?.status;
+  const text = error?.text;
+  const message = error?.message;
+
+  if (status || text) {
+    return [
+      status ? `EmailJS status: ${status}.` : "",
+      text ? `Details: ${text}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  if (message) {
+    return message;
+  }
+
+  return "Unknown EmailJS error. Check your EmailJS service and template configuration.";
+};
+
+// Send an email only for completed walk-in appointments.
+const sendWalkInCompletionEmail = async (item, officeName) => {
+  if (!isWalkInAppointment(item)) {
+    return {
+      sent: false,
+      reason: "Not a walk-in appointment.",
+    };
+  }
+
+  const recipientEmail = getAppointmentEmail(item);
+
+  if (!recipientEmail) {
+    throw new Error(
+      "The walk-in appointment has no recipient email. " +
+      "Expected the userEmail field in the appointment record."
+    );
+  }
+
+  // Generate the personalized feedback link using
+  // the latest appointment data retrieved from Firestore.
+  const personalizedFeedbackLink =
+    buildPersonalizedFeedbackLink(item);
+
+  const templateParams = {
+    to_email: recipientEmail,
+    to_name: item?.userName || "Valued Client",
+    user_name: item?.userName || "Valued Client",
+    queue_number: item?.queueNumber || "N/A",
+    office: officeName,
+    services: getServiceLabel(item),
+
+    // Must match href="{{feedback_link}}" in the EmailJS template.
+    feedback_link: personalizedFeedbackLink,
+  };
+
+  try {
+    const response = await emailjs.send(
+      EMAILJS_SERVICE_ID,
+      EMAILJS_TEMPLATE_ID,
+      templateParams,
+      EMAILJS_PUBLIC_KEY
+    );
+
+    if (response?.status && response.status !== 200) {
+      throw new Error(
+        `EmailJS returned status ${response.status}: ${
+          response.text || "Email delivery request was unsuccessful."
+        }`
+      );
+    }
+
+    return {
+      sent: true,
+      email: recipientEmail,
+      feedbackLink: personalizedFeedbackLink,
+      status: response?.status || 200,
+      responseText: response?.text || "OK",
+    };
+  } catch (error) {
+    console.error(
+      "EmailJS send request failed:",
+      {
+        status: error?.status || null,
+        text: error?.text || null,
+        message: error?.message || null,
+      }
+    );
+
+    throw new Error(getEmailJSErrorMessage(error), {
+      cause: error,
+    });
+  }
 };
 
 const getAppointmentQueueDate = (item) => {
   if (typeof item?.queueDate === "string" && item.queueDate) {
     return item.queueDate;
   }
+
   const approvedAt = item?.approvedAt;
-  const date = typeof approvedAt?.toDate === "function"
-    ? approvedAt.toDate()
-    : typeof approvedAt?.seconds === "number"
-      ? new Date(approvedAt.seconds * 1000)
-      : approvedAt instanceof Date
-        ? approvedAt
-        : approvedAt ? new Date(approvedAt) : null;
+
+  const date =
+    typeof approvedAt?.toDate === "function"
+      ? approvedAt.toDate()
+      : typeof approvedAt?.seconds === "number"
+        ? new Date(approvedAt.seconds * 1000)
+        : approvedAt instanceof Date
+          ? approvedAt
+          : approvedAt
+            ? new Date(approvedAt)
+            : null;
+
   return date && !Number.isNaN(date.getTime())
     ? getManilaDateKey(date)
     : null;
@@ -70,8 +338,6 @@ const getAppointmentQueueDate = (item) => {
 
 const isTicketForDay = (item, dateKey) =>
   getAppointmentQueueDate(item) === dateKey;
-
-
 
 const publicTicket = (item, status, queueNumber) => ({
   appointmentId: item.id,
@@ -85,8 +351,9 @@ const readTickets = (data) =>
   Array.isArray(data?.tickets) ? data.tickets : [];
 
 const withoutTicket = (tickets, appointmentId) =>
-  tickets.filter((ticket) => ticket.appointmentId !== appointmentId);
-
+  tickets.filter(
+    (ticket) => ticket.appointmentId !== appointmentId
+  );
 
 const getStatus = (item) =>
   String(item?.status || "pending").trim().toLowerCase();
@@ -95,7 +362,7 @@ const isPending = (item) =>
   ["pending", "waiting"].includes(getStatus(item));
 
 const isApproved = (item) =>
-  getStatus(item) === "approved";
+  ["approved", "confirmed"].includes(getStatus(item));
 
 const isServing = (item) =>
   ["in-progress", "serving", "now-serving"].includes(
@@ -104,6 +371,7 @@ const isServing = (item) =>
 
 const getQueueNumber = (item) => {
   if (isPending(item)) return "Pending";
+
   return item?.queueNumber
     ? String(item.queueNumber)
     : "Not Assigned";
@@ -111,26 +379,34 @@ const getQueueNumber = (item) => {
 
 const getTimestamp = (item) => {
   const value = item?.approvedAt || item?.createdAt;
+
   if (typeof value?.toMillis === "function")
     return value.toMillis();
+
   if (typeof value?.seconds === "number")
     return value.seconds * 1000;
+
   if (typeof value === "number") return value;
+
   if (typeof value === "string")
     return Date.parse(value) || 0;
+
   return 0;
 };
 
 // Display the student's actual reason separately from the selected service.
-// This field is read from each appointment's Firestore `reason` property.
 function ReasonForVisit({ item, className = "" }) {
-  const reason = typeof item?.reason === "string" ? item.reason.trim() : "";
+  const reason =
+    typeof item?.reason === "string" ? item.reason.trim() : "";
 
   return (
-    <div className={`w-full min-w-0 rounded-lg border border-blue-100 bg-blue-50/70 p-3 text-left ${className}`}>
+    <div
+      className={`w-full min-w-0 rounded-lg border border-blue-100 bg-blue-50/70 p-3 text-left ${className}`}
+    >
       <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-blue-700">
         Reason for Visit
       </p>
+
       <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-700">
         {reason || "No reason provided"}
       </p>
@@ -138,7 +414,7 @@ function ReasonForVisit({ item, className = "" }) {
   );
 }
 
-// Declared outside Swds to satisfy react-hooks/static-components.
+// View priority ID image.
 function ViewPriorityImage({
   item,
   compact = false,
@@ -160,7 +436,7 @@ function ViewPriorityImage({
   );
 }
 
-// Also declared outside Swds. All callbacks arrive as props.
+// Pending appointment card.
 function PendingCard({
   item,
   processingId,
@@ -177,13 +453,14 @@ function PendingCard({
           <span className="font-mono font-bold text-amber-700 bg-white px-2.5 py-1 rounded-md border border-amber-200 text-xs shrink-0">
             Pending
           </span>
+
           <div className="min-w-0">
             <p className="font-semibold text-slate-900 text-sm truncate">
               {item.userName || "Unknown Student"}
             </p>
-            <p className="text-xs text-slate-500 truncate">
-              {item.office} -{" "}
-              {item.service || item.reason || "Appointment"}
+
+            <p className="text-xs text-slate-500">
+              {item.office} - {getServiceLabel(item)}
             </p>
           </div>
         </div>
@@ -201,8 +478,10 @@ function PendingCard({
             ) : (
               <CheckCircle2 className="w-3.5 h-3.5" />
             )}
+
             {busy ? "Accepting..." : "Accept"}
           </button>
+
           <button
             type="button"
             onClick={() => onReject(item)}
@@ -211,7 +490,7 @@ function PendingCard({
             title="Reject with reason"
           >
             <XCircle className="w-3.5 h-3.5" />
-            Reject
+            Postponed
           </button>
         </div>
       </div>
@@ -223,11 +502,13 @@ function PendingCard({
           <Clock3 className="w-3 h-3" />
           Awaiting Staff Acceptance
         </span>
+
         {item.isPriority && (
           <span className="text-[10px] font-bold text-amber-700">
             Priority Lane
           </span>
         )}
+
         <ViewPriorityImage
           item={item}
           setSelectedImage={setSelectedImage}
@@ -243,31 +524,33 @@ export default function Swds({
   setSelectedImage,
 }) {
   const officeName = OFFICE_NAME;
-  const [todayKey, setTodayKey] = useState(() => getManilaDateKey());
 
-  // Refresh the visible queue after midnight, even if the page stays open.
+  const [todayKey, setTodayKey] = useState(() =>
+    getManilaDateKey()
+  );
+
+  // Prevent repeated automatic approval attempts for the same appointment.
+  const autoApprovalAttempted = useRef(new Set());
+
+  // Refresh the visible queue after midnight.
   useEffect(() => {
     const interval = setInterval(() => {
       setTodayKey(getManilaDateKey());
     }, 15000);
+
     return () => clearInterval(interval);
   }, []);
 
   const [appointmentToReject, setAppointmentToReject] =
     useState(null);
+
   const [rejectionReason, setRejectionReason] = useState("");
   const [isRejecting, setIsRejecting] = useState(false);
   const [rejectionError, setRejectionError] = useState("");
+
   const [processingId, setProcessingId] = useState(null);
   const [actionError, setActionError] = useState("");
   const [actionSuccess, setActionSuccess] = useState("");
-  const [showWalkInModal, setShowWalkInModal] = useState(false);
-  const [walkInName, setWalkInName] = useState("");
-  const [walkInService, setWalkInService] = useState("");
-  const [walkInReason, setWalkInReason] = useState("");
-  const [walkInPriority, setWalkInPriority] = useState(false);
-  const [walkInSaving, setWalkInSaving] = useState(false);
-  const [walkInError, setWalkInError] = useState("");
 
   const officeAppointments = (appointments || []).filter(
     (item) =>
@@ -289,9 +572,15 @@ export default function Swds({
     (item) => getStatus(item) === "completed"
   ).length;
 
-  const pendingAppointments = validAppointments
+  // All pending appointments.
+  const allPendingAppointments = validAppointments
     .filter(isPending)
     .sort((a, b) => getTimestamp(a) - getTimestamp(b));
+
+  // Only counseling appointments require staff confirmation.
+  const pendingAppointments = allPendingAppointments.filter(
+    requiresCounselingConfirmation
+  );
 
   const priorityLaneQueue = pendingAppointments.filter(
     (item) => item.isPriority
@@ -299,6 +588,12 @@ export default function Swds({
 
   const normalPendingAppointments =
     pendingAppointments.filter((item) => !item.isPriority);
+
+  // Non-counseling appointments are automatically approved.
+  const automaticApprovalAppointments =
+    allPendingAppointments.filter(
+      (item) => !requiresCounselingConfirmation(item)
+    );
 
   const approvedPriority = validAppointments
     .filter(
@@ -321,7 +616,10 @@ export default function Swds({
     .sort((a, b) => getTimestamp(a) - getTimestamp(b));
 
   const currentServing =
-    validAppointments.find((item) => isServing(item) && isTicketForDay(item, todayKey)) || null;
+    validAppointments.find(
+      (item) =>
+        isServing(item) && isTicketForDay(item, todayKey)
+    ) || null;
 
   const upcomingQueue = [
     ...approvedPriority,
@@ -333,107 +631,13 @@ export default function Swds({
     setActionSuccess("");
   };
 
-  // Walk-ins join the same daily SWDS queue as approved online appointments.
-  // The shared counter and public queue are updated in one Firestore transaction.
-  const handleRegisterWalkIn = async (event) => {
-    event.preventDefault();
-    if (walkInSaving || processingId) return;
-    const name = walkInName.trim();
-    const service = walkInService.trim();
-    const reason = walkInReason.trim();
-    if (!name || !service) {
-      setWalkInError("Student name and service are required.");
-      return;
-    }
-    if (name.length > 120 || service.length > 150 || reason.length > 500) {
-      setWalkInError("Please shorten the information entered.");
-      return;
-    }
-    const staff = auth.currentUser;
-    if (!staff) {
-      setWalkInError("Your session has expired. Please log in again.");
-      return;
-    }
-    setWalkInSaving(true);
-    setWalkInError("");
-    clearMessages();
-    try {
-      const appointmentRef = doc(collection(db, "appointments"));
-      const counterRef = doc(db, "queue-counters", officeName);
-      const publicQueueRef = doc(db, PUBLIC_QUEUE_COLLECTION, officeName);
-      const queueNumber = await runTransaction(db, async (transaction) => {
-        const counterSnapshot = await transaction.get(counterRef);
-        const publicSnapshot = await transaction.get(publicQueueRef);
-        const dateKey = getManilaDateKey();
-        const counterData = counterSnapshot.exists() ? counterSnapshot.data() : {};
-        const lastNumber = counterData.queueDate === dateKey
-          ? Number(counterData.lastNumber || 0) : 0;
-        const highestToday = Math.max(0, ...officeAppointments
-          .filter((item) => isTicketForDay(item, dateKey))
-          .map((item) => {
-            const match = String(item.queueNumber || "").match(/^SWDS-?(\d+)$/i);
-            return match ? Number(match[1]) : 0;
-          }));
-        const nextNumber = Math.max(lastNumber, highestToday) + 1;
-        const number = `SWDS-${String(nextNumber).padStart(3, "0")}`;
-        const walkIn = {
-          office: officeName,
-          userName: name,
-          service,
-          reason,
-          status: "approved",
-          source: "walk-in",
-          bookingType: "walk-in",
-          isWalkIn: true,
-          isPriority: walkInPriority,
-          queueNumber: number,
-          queuePosition: nextNumber,
-          queueDate: dateKey,
-          createdAt: serverTimestamp(),
-          approvedAt: serverTimestamp(),
-          approvedBy: staff.uid,
-          approvedByEmail: staff.email || "",
-          registeredBy: staff.uid,
-          registeredByEmail: staff.email || "",
-        };
-        const publicData = publicSnapshot.exists() ? publicSnapshot.data() : {};
-        const sameDay = publicData.queueDate === dateKey;
-        const tickets = sameDay ? readTickets(publicData) : [];
-        transaction.set(counterRef, {
-          office: officeName,
-          queueDate: dateKey,
-          lastNumber: nextNumber,
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
-        transaction.set(appointmentRef, walkIn);
-        transaction.set(publicQueueRef, {
-          office: officeName,
-          queueDate: dateKey,
-          nowServing: sameDay ? (publicData.nowServing || "") : "",
-          tickets: [...tickets, publicTicket({ ...walkIn, id: appointmentRef.id }, "approved", number)],
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
-        return number;
-      });
-      setShowWalkInModal(false);
-      setWalkInName("");
-      setWalkInService("");
-      setWalkInReason("");
-      setWalkInPriority(false);
-      setActionSuccess(`Walk-in registered. Queue number ${queueNumber} assigned.`);
-    } catch (error) {
-      console.error("Failed to register walk-in:", error);
-      setWalkInError(error?.message || "Failed to register walk-in. Check Firestore permissions.");
-    } finally {
-      setWalkInSaving(false);
-    }
-  };
-
-  // Staff accepts booking. Only now is a queue number created.
+  // Staff accepts counseling bookings.
+  // Only now is a queue number created.
   const handleAcceptAppointment = async (item) => {
     if (processingId) return;
 
     const currentStaff = auth.currentUser;
+
     if (!currentStaff) {
       setActionError(
         "Your session has expired. Please log in again."
@@ -450,26 +654,35 @@ export default function Swds({
         "appointments",
         item.id
       );
+
       const counterRef = doc(
         db,
         "queue-counters",
         officeName
       );
 
-      const publicQueueRef = doc(db, PUBLIC_QUEUE_COLLECTION, officeName);
+      const publicQueueRef = doc(
+        db,
+        PUBLIC_QUEUE_COLLECTION,
+        officeName
+      );
 
       const assignedNumber = await runTransaction(
         db,
         async (transaction) => {
           const appointmentSnapshot =
             await transaction.get(appointmentRef);
+
           const counterSnapshot =
             await transaction.get(counterRef);
+
           const publicSnapshot =
             await transaction.get(publicQueueRef);
 
           if (!appointmentSnapshot.exists()) {
-            throw new Error("The appointment could not be found.");
+            throw new Error(
+              "The appointment could not be found."
+            );
           }
 
           const appointmentData =
@@ -489,68 +702,106 @@ export default function Swds({
             appointmentData.status || "pending"
           ).trim().toLowerCase();
 
-          if (!["pending", "waiting"].includes(currentStatus)) {
+          if (
+            !["pending", "waiting"].includes(currentStatus)
+          ) {
             throw new Error(
               "Only pending appointments can be accepted."
             );
           }
 
-          // Use a per-day counter inside the transaction. The transaction
-          // retries safely if another staff member accepts simultaneously.
           const dateKey = getManilaDateKey();
+
           const counterData = counterSnapshot.exists()
             ? counterSnapshot.data()
             : {};
-          const sameDayCounter = counterData.queueDate === dateKey
-            ? Number(counterData.lastNumber || 0)
-            : 0;
 
-          // Migration safety: include today's already-approved appointments
-          // when upgrading from the old counter schema.
+          const sameDayCounter =
+            counterData.queueDate === dateKey
+              ? Number(counterData.lastNumber || 0)
+              : 0;
+
           const highestToday = Math.max(
             0,
             ...officeAppointments
-              .filter((appointment) =>
-                appointment.id !== item.id &&
-                isTicketForDay(appointment, dateKey)
+              .filter(
+                (appointment) =>
+                  appointment.id !== item.id &&
+                  isTicketForDay(appointment, dateKey)
               )
               .map((appointment) => {
-                const match = String(appointment.queueNumber || "")
-                  .match(/^SWDS-?(\d+)$/i);
+                const match = String(
+                  appointment.queueNumber || ""
+                ).match(/^SWDS-?(\d+)$/i);
+
                 return match ? Number(match[1]) : 0;
               })
           );
-          const nextNumber = Math.max(sameDayCounter, highestToday) + 1;
-          const queueNumber = `SWDS-${String(nextNumber).padStart(3, "0")}`;
 
-          transaction.set(counterRef, {
-            office: officeName,
-            queueDate: dateKey,
-            lastNumber: nextNumber,
-            updatedAt: serverTimestamp(),
-          }, { merge: true });
+          const nextNumber =
+            Math.max(sameDayCounter, highestToday) + 1;
+
+          const queueNumber = `SWDS-${String(
+            nextNumber
+          ).padStart(3, "0")}`;
+
+          transaction.set(
+            counterRef,
+            {
+              office: officeName,
+              queueDate: dateKey,
+              lastNumber: nextNumber,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
 
           const publicData = publicSnapshot.exists()
             ? publicSnapshot.data()
             : {};
-          const sameDayPublicQueue = publicData.queueDate === dateKey;
-          const tickets = sameDayPublicQueue ? readTickets(publicData) : [];
-          transaction.set(publicQueueRef, {
-            office: officeName,
-            queueDate: dateKey,
-            nowServing: sameDayPublicQueue ? (publicData.nowServing || "") : "",
-            tickets: [
-              ...withoutTicket(tickets, item.id),
-              publicTicket({ ...appointmentData, id: item.id, queuePosition: nextNumber }, "approved", queueNumber),
-            ],
-            updatedAt: serverTimestamp(),
-          }, { merge: true });
+
+          const sameDayPublicQueue =
+            publicData.queueDate === dateKey;
+
+          const tickets = sameDayPublicQueue
+            ? readTickets(publicData)
+            : [];
+
+          transaction.set(
+            publicQueueRef,
+            {
+              office: officeName,
+              queueDate: dateKey,
+
+              nowServing: sameDayPublicQueue
+                ? publicData.nowServing || ""
+                : "",
+
+              tickets: [
+                ...withoutTicket(tickets, item.id),
+                publicTicket(
+                  {
+                    ...appointmentData,
+                    id: item.id,
+                    queuePosition: nextNumber,
+                  },
+                  "approved",
+                  queueNumber
+                ),
+              ],
+
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
 
           transaction.update(appointmentRef, {
             status: "approved",
+
             queueNumber,
             queuePosition: nextNumber,
             queueDate: dateKey,
+
             approvedAt: serverTimestamp(),
             approvedBy: currentStaff.uid,
             approvedByEmail: currentStaff.email || "",
@@ -564,7 +815,11 @@ export default function Swds({
         `Appointment accepted. Queue number ${assignedNumber} assigned successfully.`
       );
     } catch (error) {
-      console.error("Failed to accept appointment:", error);
+      console.error(
+        "Failed to accept appointment:",
+        error
+      );
+
       setActionError(
         error?.message || "Failed to accept appointment."
       );
@@ -572,6 +827,28 @@ export default function Swds({
       setProcessingId(null);
     }
   };
+
+  // Automatically approve appointments that do NOT include
+  // Guidance & Counseling Services.
+  //
+  // Counseling appointments remain pending for staff confirmation.
+  useEffect(() => {
+    if (processingId) return;
+
+    const nextAppointment =
+      automaticApprovalAppointments.find(
+        (item) =>
+          !autoApprovalAttempted.current.has(item.id)
+      );
+
+    if (!nextAppointment) return;
+
+    autoApprovalAttempted.current.add(
+      nextAppointment.id
+    );
+
+    handleAcceptAppointment(nextAppointment);
+  }, [appointments, processingId]);
 
   // Explicit staff action to begin serving.
   const handleStartServing = async (item) => {
@@ -589,6 +866,7 @@ export default function Swds({
 
     try {
       const currentStaff = auth.currentUser;
+
       if (!currentStaff) {
         throw new Error(
           "Your session has expired. Please log in again."
@@ -601,77 +879,115 @@ export default function Swds({
         item.id
       );
 
-      const publicQueueRef = doc(db, PUBLIC_QUEUE_COLLECTION, officeName);
+      const publicQueueRef = doc(
+        db,
+        PUBLIC_QUEUE_COLLECTION,
+        officeName
+      );
 
-      await runTransaction(db, async (transaction) => {
-        const snapshot =
-          await transaction.get(appointmentRef);
-        const publicSnapshot =
-          await transaction.get(publicQueueRef);
+      await runTransaction(
+        db,
+        async (transaction) => {
+          const snapshot =
+            await transaction.get(appointmentRef);
 
-        if (!snapshot.exists()) {
-          throw new Error("Appointment not found.");
-        }
+          const publicSnapshot =
+            await transaction.get(publicQueueRef);
 
-        const data = snapshot.data();
+          if (!snapshot.exists()) {
+            throw new Error("Appointment not found.");
+          }
 
-        if (
-          String(data.office || "")
-            .trim()
-            .toLowerCase() !== officeName.toLowerCase()
-        ) {
-          throw new Error(
-            "This appointment does not belong to SWDS."
+          const data = snapshot.data();
+
+          if (
+            String(data.office || "")
+              .trim()
+              .toLowerCase() !== officeName.toLowerCase()
+          ) {
+            throw new Error(
+              "This appointment does not belong to SWDS."
+            );
+          }
+
+          if (getStatus(data) !== "approved") {
+            throw new Error(
+              "Only approved appointments or registered walk-ins can be served."
+            );
+          }
+
+          const dateKey = getManilaDateKey();
+
+          if (!isTicketForDay(data, dateKey)) {
+            throw new Error(
+              "This ticket belongs to a previous day and cannot be served today."
+            );
+          }
+
+          if (!data.queueNumber) {
+            throw new Error(
+              "This appointment has no assigned queue number."
+            );
+          }
+
+          const publicData =
+            publicSnapshot.data() || {};
+
+          const sameDayPublicQueue =
+            publicData.queueDate === dateKey;
+
+          if (
+            sameDayPublicQueue &&
+            publicData.nowServing &&
+            publicData.nowServing !== data.queueNumber
+          ) {
+            throw new Error(
+              "Another ticket is currently being served."
+            );
+          }
+
+          const tickets = sameDayPublicQueue
+            ? readTickets(publicData)
+            : [];
+
+          transaction.set(
+            publicQueueRef,
+            {
+              office: officeName,
+              queueDate: dateKey,
+              nowServing: data.queueNumber,
+
+              tickets: [
+                ...withoutTicket(tickets, item.id),
+                publicTicket(
+                  { ...data, id: item.id },
+                  "in-progress"
+                ),
+              ],
+
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
           );
-        }
 
-        if (getStatus(data) !== "approved") {
-          throw new Error(
-            "Only approved appointments or registered walk-ins can be served."
-          );
+          transaction.update(appointmentRef, {
+            status: "in-progress",
+            servingAt: serverTimestamp(),
+            servingBy: currentStaff.uid,
+            servingByEmail: currentStaff.email || "",
+          });
         }
-
-        const dateKey = getManilaDateKey();
-        if (!isTicketForDay(data, dateKey)) {
-          throw new Error("This ticket belongs to a previous day and cannot be served today.");
-        }
-
-        if (!data.queueNumber) {
-          throw new Error(
-            "This appointment has no assigned queue number."
-          );
-        }
-
-        const publicData = publicSnapshot.data() || {};
-        const sameDayPublicQueue = publicData.queueDate === dateKey;
-        if (sameDayPublicQueue && publicData.nowServing && publicData.nowServing !== data.queueNumber) {
-          throw new Error("Another ticket is currently being served.");
-        }
-        const tickets = sameDayPublicQueue ? readTickets(publicData) : [];
-        transaction.set(publicQueueRef, {
-          office: officeName,
-          queueDate: dateKey,
-          nowServing: data.queueNumber,
-          tickets: [
-            ...withoutTicket(tickets, item.id),
-            publicTicket({ ...data, id: item.id }, "in-progress"),
-          ],
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
-
-        transaction.update(appointmentRef, {
-          status: "in-progress",
-          servingAt: serverTimestamp(),
-          servingBy: currentStaff.uid,
-          servingByEmail: currentStaff.email || "",
-        });
-      });
+      );
 
       setActionSuccess(
         `Now serving ${item.queueNumber}.`
       );
     } catch (error) {
-      console.error("Failed to start serving:", error);
+      console.error(
+        "Failed to start serving:",
+        error
+      );
+
       setActionError(
         error?.message || "Failed to start serving."
       );
@@ -680,7 +996,8 @@ export default function Swds({
     }
   };
 
-  // Existing completion callback is preserved.
+  // Complete appointment.
+  // Email notification is sent ONLY for walk-in appointments.
   const handleCompleteAppointment = async (item) => {
     if (processingId) return;
 
@@ -694,27 +1011,120 @@ export default function Swds({
         );
       }
 
+      // Preserve the existing appointment completion functionality.
       await completeAppointment(item.id);
-      const publicQueueRef = doc(db, PUBLIC_QUEUE_COLLECTION, officeName);
-      await runTransaction(db, async (transaction) => {
-        const publicSnapshot = await transaction.get(publicQueueRef);
-        const publicData = publicSnapshot.data() || {};
-        const sameDay = publicData.queueDate === getManilaDateKey();
-        const matchingServingTicket = readTickets(publicData).some(
-          (ticket) => ticket.appointmentId === item.id && ticket.queueNumber === publicData.nowServing
+
+      // Remove the completed appointment from the public queue.
+      const publicQueueRef = doc(
+        db,
+        PUBLIC_QUEUE_COLLECTION,
+        officeName
+      );
+
+      await runTransaction(
+        db,
+        async (transaction) => {
+          const publicSnapshot =
+            await transaction.get(publicQueueRef);
+
+          const publicData =
+            publicSnapshot.data() || {};
+
+          const sameDay =
+            publicData.queueDate === getManilaDateKey();
+
+          const matchingServingTicket =
+            readTickets(publicData).some(
+              (ticket) =>
+                ticket.appointmentId === item.id &&
+                ticket.queueNumber === publicData.nowServing
+            );
+
+          transaction.set(
+            publicQueueRef,
+            {
+              office: officeName,
+
+              nowServing:
+                sameDay && matchingServingTicket
+                  ? ""
+                  : publicData.nowServing || "",
+
+              tickets: withoutTicket(
+                readTickets(publicData),
+                item.id
+              ),
+
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+      );
+
+      // Send an email only if the LATEST Firestore appointment
+      // record identifies this appointment as a walk-in.
+      // This avoids relying on potentially stale React state.
+      let emailMessage = "";
+
+      try {
+        const appointmentRef = doc(
+          db,
+          "appointments",
+          item.id
         );
-        transaction.set(publicQueueRef, {
-          office: officeName,
-          nowServing: sameDay && matchingServingTicket ? "" : (publicData.nowServing || ""),
-          tickets: withoutTicket(readTickets(publicData), item.id),
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
-      });
+
+        // Fetch the latest appointment record after completion.
+        const latestAppointmentSnapshot =
+          await getDoc(appointmentRef);
+
+        if (!latestAppointmentSnapshot.exists()) {
+          throw new Error(
+            "The completed appointment could not be retrieved from Firestore. " +
+            "The feedback email could not be prepared."
+          );
+        }
+
+        const latestAppointment = {
+          ...latestAppointmentSnapshot.data(),
+          id: latestAppointmentSnapshot.id,
+        };
+
+        // Only walk-in appointments receive the completion email.
+        if (isWalkInAppointment(latestAppointment)) {
+          const emailResult =
+            await sendWalkInCompletionEmail(
+              latestAppointment,
+              officeName
+            );
+
+          if (emailResult.sent) {
+            emailMessage =
+              ` A completion email was successfully sent to ${emailResult.email}.`;
+          }
+        }
+      } catch (emailError) {
+        console.error(
+          "Walk-in completion email failed:",
+          emailError
+        );
+
+        // The appointment remains completed even if the email fails.
+        emailMessage =
+          ` However, the completion email failed: ${
+            emailError?.message || "Unknown email error"
+          }`;
+      }
+
       setActionSuccess(
-        `Appointment ${item.queueNumber || ""} completed successfully.`
+        `Appointment ${item.queueNumber || ""} completed successfully.${emailMessage}`
       );
     } catch (error) {
-      console.error("Failed to complete appointment:", error);
+      console.error(
+        "Failed to complete appointment:",
+        error
+      );
+
       setActionError(
         error?.message || "Failed to complete appointment."
       );
@@ -731,6 +1141,7 @@ export default function Swds({
 
   const closeRejectModal = () => {
     if (isRejecting) return;
+
     setAppointmentToReject(null);
     setRejectionReason("");
     setRejectionError("");
@@ -739,6 +1150,7 @@ export default function Swds({
   // Original Firestore rejection and archive functionality.
   const handleConfirmRejection = async () => {
     const reason = rejectionReason.trim();
+
     if (!appointmentToReject) return;
 
     if (!reason) {
@@ -758,6 +1170,7 @@ export default function Swds({
     if (isRejecting) return;
 
     const currentStaff = auth.currentUser;
+
     if (!currentStaff) {
       setRejectionError(
         "Your session has expired. Please log in again."
@@ -770,98 +1183,135 @@ export default function Swds({
 
     try {
       const appointmentId = appointmentToReject.id;
+
       const appointmentRef = doc(
         db,
         "appointments",
         appointmentId
       );
+
       const rejectedAppointmentRef = doc(
         db,
         "rejected-appointments",
         appointmentId
       );
-      const publicQueueRef = doc(db, PUBLIC_QUEUE_COLLECTION, officeName);
 
-      await runTransaction(db, async (transaction) => {
-        const appointmentSnapshot =
-          await transaction.get(appointmentRef);
-        const publicSnapshot =
-          await transaction.get(publicQueueRef);
+      const publicQueueRef = doc(
+        db,
+        PUBLIC_QUEUE_COLLECTION,
+        officeName
+      );
 
-        if (!appointmentSnapshot.exists()) {
-          throw new Error(
-            "The appointment could not be found."
+      await runTransaction(
+        db,
+        async (transaction) => {
+          const appointmentSnapshot =
+            await transaction.get(appointmentRef);
+
+          const publicSnapshot =
+            await transaction.get(publicQueueRef);
+
+          if (!appointmentSnapshot.exists()) {
+            throw new Error(
+              "The appointment could not be found."
+            );
+          }
+
+          const appointmentData =
+            appointmentSnapshot.data();
+
+          if (
+            String(appointmentData.office || "")
+              .trim()
+              .toLowerCase() !== officeName.toLowerCase()
+          ) {
+            throw new Error(
+              "This appointment does not belong to SWDS."
+            );
+          }
+
+          const currentStatus =
+            getStatus(appointmentData);
+
+          if (
+            [
+              "rejected",
+              "completed",
+              "cancelled",
+              "canceled",
+            ].includes(currentStatus)
+          ) {
+            throw new Error(
+              "This appointment has already been processed."
+            );
+          }
+
+          const rejectionDetails = {
+            status: "rejected",
+            rejectionReason: reason,
+            rejectedAt: serverTimestamp(),
+            rejectedBy: currentStaff.uid,
+            rejectedByEmail: currentStaff.email || "",
+          };
+
+          transaction.update(
+            appointmentRef,
+            rejectionDetails
+          );
+
+          transaction.set(
+            rejectedAppointmentRef,
+            {
+              ...appointmentData,
+              id: appointmentId,
+              appointmentId,
+              ...rejectionDetails,
+            }
+          );
+
+          const publicData =
+            publicSnapshot.data() || {};
+
+          transaction.set(
+            publicQueueRef,
+            {
+              office: officeName,
+
+              nowServing:
+                publicData.queueDate === getManilaDateKey() &&
+                readTickets(publicData).some(
+                  (ticket) =>
+                    ticket.appointmentId === appointmentId &&
+                    ticket.queueNumber === publicData.nowServing
+                )
+                  ? ""
+                  : publicData.nowServing || "",
+
+              tickets: withoutTicket(
+                readTickets(publicData),
+                appointmentId
+              ),
+
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
           );
         }
-
-        const appointmentData =
-          appointmentSnapshot.data();
-
-        if (
-          String(appointmentData.office || "")
-            .trim()
-            .toLowerCase() !== officeName.toLowerCase()
-        ) {
-          throw new Error(
-            "This appointment does not belong to SWDS."
-          );
-        }
-
-        const currentStatus = getStatus(appointmentData);
-
-        if (
-          [
-            "rejected",
-            "completed",
-            "cancelled",
-            "canceled",
-          ].includes(currentStatus)
-        ) {
-          throw new Error(
-            "This appointment has already been processed."
-          );
-        }
-
-        const rejectionDetails = {
-          status: "rejected",
-          rejectionReason: reason,
-          rejectedAt: serverTimestamp(),
-          rejectedBy: currentStaff.uid,
-          rejectedByEmail: currentStaff.email || "",
-        };
-
-        transaction.update(
-          appointmentRef,
-          rejectionDetails
-        );
-
-        transaction.set(rejectedAppointmentRef, {
-          ...appointmentData,
-          id: appointmentId,
-          appointmentId,
-          ...rejectionDetails,
-        });
-
-        const publicData = publicSnapshot.data() || {};
-        transaction.set(publicQueueRef, {
-          office: officeName,
-          nowServing: publicData.queueDate === getManilaDateKey() &&
-            readTickets(publicData).some((ticket) =>
-              ticket.appointmentId === appointmentId && ticket.queueNumber === publicData.nowServing
-            ) ? "" : (publicData.nowServing || ""),
-          tickets: withoutTicket(readTickets(publicData), appointmentId),
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
-      });
+      );
 
       setAppointmentToReject(null);
       setRejectionReason("");
       setRejectionError("");
+
       setActionSuccess(
         "Appointment rejected successfully."
       );
     } catch (error) {
-      console.error("Failed to reject appointment:", error);
+      console.error(
+        "Failed to reject appointment:",
+        error
+      );
+
       setRejectionError(
         error?.message ||
           "Failed to reject the appointment. Please try again."
@@ -873,19 +1323,11 @@ export default function Swds({
 
   return (
     <>
-      {/* Walk-in registration trigger */}
-      <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-blue-200 bg-blue-50/60 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-bold text-slate-900">
-            <UserPlus className="h-5 w-5 text-blue-600" /> Walk-In Registration ({officeName})
-          </h2>
-          <p className="mt-1 text-xs text-slate-600">Register students without online appointments and assign a queue number immediately.</p>
-        </div>
-        <button type="button" onClick={() => { setWalkInError(""); setShowWalkInModal(true); }}
-          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">
-          <UserPlus className="h-4 w-4" /> Add Walk-In
-        </button>
-      </div>
+      {/* Walk-in registration component */}
+      <WalkIn
+        appointments={officeAppointments}
+        officeName={officeName}
+      />
 
       {/* Action feedback */}
       {actionError && (
@@ -894,6 +1336,7 @@ export default function Swds({
           className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"
         >
           <span>{actionError}</span>
+
           <button
             type="button"
             onClick={() => setActionError("")}
@@ -910,6 +1353,7 @@ export default function Swds({
           className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700"
         >
           <span>{actionSuccess}</span>
+
           <button
             type="button"
             onClick={() => setActionSuccess("")}
@@ -937,23 +1381,24 @@ export default function Swds({
                   </span>
 
                   <p className="font-semibold text-slate-800 text-base sm:text-lg mt-1 px-2 break-words">
-                    {currentServing.userName ||
-                      "Unknown Student"}
+                    {currentServing.userName || "Unknown Student"}
                   </p>
 
-                  <span className="inline-block px-2.5 py-0.5 rounded-md text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-100 my-1 max-w-full truncate">
-                    {currentServing.office} -{" "}
-                    {currentServing.service ||
-                      currentServing.reason}
+                  <span className="inline-block px-2.5 py-0.5 rounded-md text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-100 my-1 max-w-full break-words">
+                    {currentServing.office} - {getServiceLabel(currentServing)}
                   </span>
 
-                  <ReasonForVisit item={currentServing} className="mt-3" />
+                  <ReasonForVisit
+                    item={currentServing}
+                    className="mt-3"
+                  />
 
                   {currentServing.isPriority && (
                     <div className="mt-3 mb-1 flex flex-col items-center gap-2">
                       <span className="inline-block px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
                         Priority Lane Active
                       </span>
+
                       <ViewPriorityImage
                         item={currentServing}
                         setSelectedImage={setSelectedImage}
@@ -964,9 +1409,9 @@ export default function Swds({
               ) : (
                 <div className="py-8 sm:py-12">
                   <Users className="w-10 h-10 sm:w-12 sm:h-12 text-slate-300 mx-auto mb-2" />
+
                   <p className="text-slate-500 text-sm font-medium px-2">
-                    No active ticket being served for{" "}
-                    {officeName}.
+                    No active ticket being served for {officeName}.
                   </p>
                 </div>
               )}
@@ -1001,21 +1446,20 @@ export default function Swds({
                   <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0" />
                   Priority Lineup ({officeName})
                 </h2>
+
                 <span className="self-start sm:self-auto text-xs font-semibold bg-amber-50 text-amber-700 px-2 py-1 rounded-lg border border-amber-200">
                   {priorityLaneQueue.length} Pending
                 </span>
               </div>
 
               <p className="text-xs text-slate-500 mb-4">
-                Priority bookings remain pending until staff
-                accepts them and assigns a queue number.
+                Priority counseling bookings remain pending until staff accepts them and assigns a queue number.
               </p>
 
               {priorityLaneQueue.length === 0 ? (
                 <div className="py-8 sm:py-12 text-center">
                   <p className="text-slate-500 text-sm font-medium px-2">
-                    No pending priority bookings for{" "}
-                    {officeName}.
+                    No pending priority counseling bookings for {officeName}.
                   </p>
                 </div>
               ) : (
@@ -1042,21 +1486,20 @@ export default function Swds({
                 <Clock3 className="w-5 h-5 text-amber-600 shrink-0" />
                 Pending Appointments ({officeName})
               </h2>
+
               <span className="self-start sm:self-auto text-xs font-semibold bg-amber-50 text-amber-700 px-2 py-1 rounded-lg border border-amber-200">
                 {normalPendingAppointments.length} Pending
               </span>
             </div>
 
             <p className="text-xs text-slate-500 mb-4">
-              Regular bookings are pending until accepted
-              by staff. No queue number is assigned yet.
+              Only bookings that include Guidance & Counseling Services require staff confirmation. Other services are automatically queued.
             </p>
 
             {normalPendingAppointments.length === 0 ? (
               <div className="py-8 sm:py-12 text-center">
                 <p className="text-slate-500 text-sm font-medium">
-                  No pending regular appointments for{" "}
-                  {officeName}.
+                  No pending regular counseling appointments for {officeName}.
                 </p>
               </div>
             ) : (
@@ -1083,21 +1526,20 @@ export default function Swds({
               <h2 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
                 Upcoming Queue ({officeName})
               </h2>
+
               <span className="self-start sm:self-auto text-xs font-semibold bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">
                 {upcomingQueue.length} Waiting
               </span>
             </div>
 
             <p className="text-xs text-slate-500 mb-4">
-              Approved online appointments and registered walk-ins with assigned queue
-              numbers appear here.
+              Automatically approved appointments, accepted counseling appointments, and registered walk-ins with assigned queue numbers appear here.
             </p>
 
             {upcomingQueue.length === 0 ? (
               <div className="py-8 sm:py-12 text-center">
                 <p className="text-slate-500 text-sm font-medium px-2">
-                  No accepted appointments in the upcoming
-                  queue for {officeName}.
+                  No accepted appointments in the upcoming queue for {officeName}.
                 </p>
               </div>
             ) : (
@@ -1112,16 +1554,14 @@ export default function Swds({
                         <span className="font-mono font-bold text-slate-900 bg-white px-2.5 py-1 rounded-md border border-slate-200 text-xs shadow-2xs shrink-0">
                           {getQueueNumber(item)}
                         </span>
+
                         <div className="min-w-0">
                           <p className="font-semibold text-slate-900 text-sm truncate">
-                            {item.userName ||
-                              "Unknown Student"}
+                            {item.userName || "Unknown Student"}
                           </p>
-                          <p className="text-xs text-slate-500 truncate">
-                            {item.office} -{" "}
-                            {item.service ||
-                              item.reason ||
-                              "Appointment"}
+
+                          <p className="text-xs text-slate-500 break-words">
+                            {item.office} - {getServiceLabel(item)}
                           </p>
                         </div>
                       </div>
@@ -1146,6 +1586,7 @@ export default function Swds({
                           )}
                           Serve
                         </button>
+
                         <button
                           type="button"
                           onClick={() =>
@@ -1153,10 +1594,10 @@ export default function Swds({
                           }
                           disabled={Boolean(processingId)}
                           className="inline-flex items-center gap-1 text-rose-700 hover:text-rose-800 font-semibold text-xs bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 rounded-lg border border-rose-200 transition-colors disabled:opacity-50"
-                          title="Reject with reason"
+                          title="Postpone with reason"
                         >
                           <XCircle className="w-3.5 h-3.5" />
-                          Reject
+                          Postpone
                         </button>
                       </div>
                     </div>
@@ -1167,11 +1608,13 @@ export default function Swds({
                       <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
                         Approved - Waiting
                       </span>
+
                       {item.isPriority && (
                         <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
                           Priority Lane (Approved)
                         </span>
                       )}
+
                       <ViewPriorityImage
                         item={item}
                         compact
@@ -1190,14 +1633,17 @@ export default function Swds({
                 <p className="text-xl font-bold text-amber-700">
                   {pendingAppointments.length}
                 </p>
+
                 <p className="text-xs text-amber-700">
                   Pending Approval
                 </p>
               </div>
+
               <div className="rounded-xl bg-emerald-50 p-3 text-center">
                 <p className="text-xl font-bold text-emerald-700">
                   {completedCount}
                 </p>
+
                 <p className="text-xs text-emerald-700">
                   Completed
                 </p>
@@ -1206,73 +1652,6 @@ export default function Swds({
           </div>
         </div>
       </div>
-
-      {/* Walk-in registration modal */}
-      {showWalkInModal && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm"
-          role="presentation" onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !walkInSaving) setShowWalkInModal(false);
-          }}>
-          <form onSubmit={handleRegisterWalkIn} role="dialog" aria-modal="true"
-            aria-labelledby="swds-walkin-title"
-            className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl sm:p-6">
-            <div className="mb-5 flex items-start justify-between gap-3">
-              <div>
-                <h2 id="swds-walkin-title" className="flex items-center gap-2 text-lg font-bold text-slate-900">
-                  <UserPlus className="h-5 w-5 text-blue-600" /> Register Walk-In
-                </h2>
-                <p className="mt-1 text-xs text-slate-500">SWDS • Queue number assigned automatically upon registration.</p>
-              </div>
-              <button type="button" aria-label="Close walk-in registration" disabled={walkInSaving}
-                onClick={() => setShowWalkInModal(false)} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-50">
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <label htmlFor="walkin-name" className="mb-1.5 block text-sm font-semibold text-slate-700">Student Name *</label>
-                <input id="walkin-name" required maxLength={120} value={walkInName}
-                  onChange={(event) => setWalkInName(event.target.value)} disabled={walkInSaving}
-                  placeholder="Enter student's full name"
-                  className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
-              </div>
-              <div>
-                <label htmlFor="walkin-service" className="mb-1.5 block text-sm font-semibold text-slate-700">SWDS Service *</label>
-                <select id="walkin-service" required value={walkInService}
-                  onChange={(event) => setWalkInService(event.target.value)} disabled={walkInSaving}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100">
-                  <option value="">Select service</option>
-                  {SWDS_SERVICES.map((service) => (
-                    <option key={service} value={service}>{service}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label htmlFor="walkin-reason" className="mb-1.5 block text-sm font-semibold text-slate-700">Reason for Visit</label>
-                <textarea id="walkin-reason" rows={3} maxLength={500} value={walkInReason}
-                  onChange={(event) => setWalkInReason(event.target.value)} disabled={walkInSaving}
-                  placeholder="Optional additional details"
-                  className="w-full resize-none rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
-              </div>
-              <label className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-slate-700">
-                <input type="checkbox" checked={walkInPriority} onChange={(event) => setWalkInPriority(event.target.checked)} disabled={walkInSaving}
-                  className="h-4 w-4 accent-amber-600" />
-                Priority lane (eligible PWD / senior citizen)
-              </label>
-              {walkInError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-xs font-medium text-rose-700">{walkInError}</p>}
-            </div>
-            <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-              <button type="button" disabled={walkInSaving} onClick={() => setShowWalkInModal(false)}
-                className="rounded-xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancel</button>
-              <button type="submit" disabled={walkInSaving || !walkInName.trim() || !walkInService}
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">
-                {walkInSaving && <Loader2 className="h-4 w-4 animate-spin" />}
-                {walkInSaving ? "Registering..." : "Register & Assign Queue"}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
 
       {/* Rejection Reason Modal */}
       {appointmentToReject && (
@@ -1296,6 +1675,7 @@ export default function Swds({
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rose-100">
                   <AlertTriangle className="h-5 w-5 text-rose-600" />
                 </div>
+
                 <div>
                   <h2
                     id="swds-reject-title"
@@ -1303,11 +1683,13 @@ export default function Swds({
                   >
                     Reject Appointment
                   </h2>
+
                   <p className="mt-1 text-xs text-slate-500">
                     Please provide a reason for rejection.
                   </p>
                 </div>
               </div>
+
               <button
                 type="button"
                 onClick={closeRejectModal}
@@ -1324,47 +1706,58 @@ export default function Swds({
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Appointment Details
               </p>
+
               <div className="mt-3 space-y-2">
                 <div className="flex justify-between gap-3">
                   <span className="text-xs text-slate-500">
                     Queue Number
                   </span>
+
                   <span className="text-xs font-bold text-slate-900">
                     {getQueueNumber(appointmentToReject)}
                   </span>
                 </div>
+
                 <div className="flex justify-between gap-3">
                   <span className="text-xs text-slate-500">
                     Student
                   </span>
+
                   <span className="text-right text-xs font-semibold text-slate-900">
-                    {appointmentToReject.userName ||
-                      "Unknown Student"}
+                    {appointmentToReject.userName || "Unknown Student"}
                   </span>
                 </div>
+
                 <div className="flex justify-between gap-3">
                   <span className="text-xs text-slate-500">
                     Office
                   </span>
+
                   <span className="text-xs font-semibold text-slate-900">
                     {appointmentToReject.office || officeName}
                   </span>
                 </div>
+
                 <div className="flex justify-between gap-3">
                   <span className="text-xs text-slate-500">
-                    Service
+                    Services
                   </span>
+
                   <span className="text-right text-xs font-semibold text-slate-900">
-                    {appointmentToReject.service ||
-                      appointmentToReject.reason ||
-                      "N/A"}
+                    {getServiceLabel(appointmentToReject)}
                   </span>
                 </div>
-                <ReasonForVisit item={appointmentToReject} className="mt-3" />
+
+                <ReasonForVisit
+                  item={appointmentToReject}
+                  className="mt-3"
+                />
+
                 <div className="flex justify-between gap-3">
                   <span className="text-xs text-slate-500">
                     Status
                   </span>
+
                   <span className="text-xs font-semibold text-slate-900 capitalize">
                     {getStatus(appointmentToReject)}
                   </span>
@@ -1381,12 +1774,16 @@ export default function Swds({
                 Reason for Rejection{" "}
                 <span className="text-rose-600">*</span>
               </label>
+
               <textarea
                 id="swds-rejection-reason"
                 value={rejectionReason}
                 onChange={(event) => {
                   setRejectionReason(event.target.value);
-                  if (rejectionError) setRejectionError("");
+
+                  if (rejectionError) {
+                    setRejectionError("");
+                  }
                 }}
                 placeholder="Explain why this appointment is being rejected..."
                 rows={4}
@@ -1395,15 +1792,17 @@ export default function Swds({
                 aria-invalid={Boolean(rejectionError)}
                 className="w-full resize-none rounded-xl border border-slate-300 bg-white px-3.5 py-3 text-sm text-slate-900 outline-none transition-colors placeholder:text-slate-400 focus:border-rose-500 focus:ring-2 focus:ring-rose-100 disabled:opacity-60"
               />
+
               <div className="mt-1.5 flex justify-between gap-3">
                 <p className="text-xs text-slate-500">
-                  This reason will be saved in both
-                  appointments and rejected-appointments.
+                  This reason will be saved in both appointments and rejected-appointments.
                 </p>
+
                 <span className="shrink-0 text-xs text-slate-400">
                   {rejectionReason.length}/500
                 </span>
               </div>
+
               {rejectionError && (
                 <p
                   role="alert"
@@ -1424,6 +1823,7 @@ export default function Swds({
               >
                 Cancel
               </button>
+
               <button
                 type="button"
                 onClick={handleConfirmRejection}

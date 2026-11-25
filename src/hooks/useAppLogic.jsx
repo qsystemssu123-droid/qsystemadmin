@@ -206,7 +206,6 @@ export function useAppLogic() {
       return [
         'queue',
         'appointments',
-        'announcement',
         'profile'
       ].includes(item.id);
     }
@@ -224,7 +223,7 @@ export function useAppLogic() {
   const adminName =
     adminUser?.displayName ||
     adminUser?.name ||
-    'Koby R. Sacendoncillo';
+    'QueueMatrix Admin';
 
   const adminPhoto = adminUser?.photoURL;
 
