@@ -13,6 +13,7 @@ import {
   setDoc,
   deleteDoc,
   getDocs,
+  getDoc,
   serverTimestamp
 } from 'firebase/firestore';
 import { db, auth } from '../services/firebase';
@@ -28,11 +29,69 @@ import {
   Users,
   Search,
   User,
-  KeyRound
+  KeyRound,
+  Briefcase,
+  Save,
+  RefreshCw,
+  UserCheck
 } from 'lucide-react';
 
 // Automatically assigned office for all new staff accounts
 const DEFAULT_STAFF_OFFICE = 'SWDS';
+
+// Only these three staff members can be assigned to SWDS services
+const ASSIGNABLE_STAFF_EMAILS = [
+  'staff.ssu.glenn@gmail.com',
+  'staff.ssu.chenyl@gmail.com',
+  'staff.ssu.patricia@gmail.com'
+];
+
+// SWDS services
+const SWDS_SERVICES = [
+  {
+    id: 'admission_recruitment',
+    name: 'Admission and Recruitment Services'
+  },
+  {
+    id: 'psychological_wellness',
+    name: 'Psychological and Wellness Services'
+  },
+  {
+    id: 'guidance_counseling',
+    name: 'Guidance and Counseling Services'
+  },
+  {
+    id: 'information_orientation',
+    name: 'Orientation and Information Services'
+  },
+  {
+    id: 'career_placement_peso',
+    name: 'Career and Placement Services and PESO'
+  },
+  {
+    id: 'student_organizations',
+    name: 'Student Organizations'
+  },
+  {
+    id: 'special_needs_pwd',
+    name: 'Services for Students with Special Needs & PWDs'
+  },
+  {
+    id: 'economic_enterprise',
+    name: 'Economic Enterprise Development'
+  },
+  {
+    id: 'university_student_council',
+    name: 'University Student Council'
+  },
+  {
+    id: 'multi_faith',
+    name: 'Multi-Faith Services'
+  }
+];
+
+const ASSIGNMENT_DOC = 'swds_service_assignments';
+const ASSIGNMENT_DOC_ID = 'current';
 
 export default function Staff() {
   // Form states
@@ -47,6 +106,19 @@ export default function Staff() {
   const [successMsg, setSuccessMsg] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
 
+  // SWDS assignment states
+  const [serviceAssignments, setServiceAssignments] = useState({});
+  const [originalAssignments, setOriginalAssignments] = useState({});
+  const [loadingAssignments, setLoadingAssignments] = useState(true);
+  const [savingAssignments, setSavingAssignments] = useState(false);
+
+  // Get only Glenn, Shenyl, and Patricia
+  const assignableStaff = staffList.filter((staff) =>
+    ASSIGNABLE_STAFF_EMAILS.includes(
+      staff.email?.trim().toLowerCase()
+    )
+  );
+
   // Reusable fetch logic for manual refreshes
   const fetchStaff = async () => {
     try {
@@ -58,34 +130,72 @@ export default function Staff() {
       }));
 
       setStaffList(staffArray);
+
+      return staffArray;
     } catch (err) {
       console.error('Error fetching staff:', err);
+      throw err;
+    }
+  };
+
+  // Fetch saved SWDS service assignments
+  const fetchAssignments = async () => {
+    try {
+      setLoadingAssignments(true);
+
+      const assignmentRef = doc(
+        db,
+        ASSIGNMENT_DOC,
+        ASSIGNMENT_DOC_ID
+      );
+
+      const assignmentSnapshot = await getDoc(assignmentRef);
+
+      if (assignmentSnapshot.exists()) {
+        const savedAssignments =
+          assignmentSnapshot.data().assignments || {};
+
+        setServiceAssignments(savedAssignments);
+        setOriginalAssignments(savedAssignments);
+      } else {
+        setServiceAssignments({});
+        setOriginalAssignments({});
+      }
+    } catch (err) {
+      console.error('Error fetching SWDS assignments:', err);
+      setError('Failed to load SWDS service assignments: ' + err.message);
+    } finally {
+      setLoadingAssignments(false);
     }
   };
 
   useEffect(() => {
     let isMounted = true;
 
-    async function loadInitialStaff() {
+    async function loadInitialData() {
       try {
-        const querySnapshot = await getDocs(collection(db, 'staff'));
+        const staffSnapshot = await getDocs(collection(db, 'staff'));
 
-        if (isMounted) {
-          const staffArray = querySnapshot.docs.map((staffDoc) => ({
-            id: staffDoc.id,
-            ...staffDoc.data()
-          }));
+        if (!isMounted) return;
 
-          setStaffList(staffArray);
-        }
+        const staffArray = staffSnapshot.docs.map((staffDoc) => ({
+          id: staffDoc.id,
+          ...staffDoc.data()
+        }));
+
+        setStaffList(staffArray);
+
+        await fetchAssignments();
       } catch (err) {
         if (isMounted) {
-          console.error('Error fetching staff:', err);
+          console.error('Error loading staff management:', err);
+          setError('Failed to load staff management data: ' + err.message);
+          setLoadingAssignments(false);
         }
       }
     }
 
-    loadInitialStaff();
+    loadInitialData();
 
     return () => {
       isMounted = false;
@@ -103,6 +213,8 @@ export default function Staff() {
     // No office selection is required from the user.
     setLoading(true);
 
+    let secondaryAuth = null;
+
     try {
       const firebaseConfig = auth.app.options;
       const secondaryAppName = 'SecondaryStaffApp';
@@ -113,11 +225,11 @@ export default function Staff() {
         ? initializeApp(firebaseConfig, secondaryAppName)
         : getApp(secondaryAppName);
 
-      const secondaryAuth = getAuth(secondaryApp);
+      secondaryAuth = getAuth(secondaryApp);
 
       const userCredential = await createUserWithEmailAndPassword(
         secondaryAuth,
-        email,
+        email.trim(),
         password
       );
 
@@ -125,8 +237,8 @@ export default function Staff() {
 
       // Automatically save SWDS as the staff office in Firestore.
       await setDoc(doc(db, 'staff', uid), {
-        name: name,
-        email: email,
+        name: name.trim(),
+        email: email.trim(),
         office: DEFAULT_STAFF_OFFICE,
         createdAt: serverTimestamp()
       });
@@ -142,6 +254,14 @@ export default function Staff() {
       await fetchStaff();
     } catch (err) {
       setError(err.message);
+
+      if (secondaryAuth) {
+        try {
+          await signOut(secondaryAuth);
+        } catch (signOutError) {
+          console.error('Secondary authentication sign-out error:', signOutError);
+        }
+      }
     } finally {
       setLoading(false);
     }
@@ -171,7 +291,18 @@ export default function Staff() {
 
   // Handle deleting staff member
   const handleDeleteStaff = async (uid) => {
-    if (!window.confirm('Are you sure you want to delete this staff member?')) {
+    const staffToDelete = staffList.find((staff) => staff.id === uid);
+
+    if (!staffToDelete) {
+      setError('Staff member not found.');
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Are you sure you want to delete ${staffToDelete.name}? Any SWDS services assigned to this staff member will also become unassigned.`
+      )
+    ) {
       return;
     }
 
@@ -179,14 +310,183 @@ export default function Staff() {
     setSuccessMsg('');
 
     try {
+      // Remove the staff member from all SWDS service assignments
+      const assignmentRef = doc(
+        db,
+        ASSIGNMENT_DOC,
+        ASSIGNMENT_DOC_ID
+      );
+
+      const assignmentSnapshot = await getDoc(assignmentRef);
+
+      if (assignmentSnapshot.exists()) {
+        const currentAssignments =
+          assignmentSnapshot.data().assignments || {};
+
+        const updatedAssignments = { ...currentAssignments };
+
+        Object.keys(updatedAssignments).forEach((serviceId) => {
+          if (updatedAssignments[serviceId]?.staffId === uid) {
+            delete updatedAssignments[serviceId];
+          }
+        });
+
+        await setDoc(
+          assignmentRef,
+          {
+            assignments: updatedAssignments,
+            updatedAt: serverTimestamp()
+          },
+          { merge: true }
+        );
+      }
+
+      // Remove staff record
       await deleteDoc(doc(db, 'staff', uid));
 
-      setSuccessMsg('Staff record removed successfully.');
+      setServiceAssignments((prev) => {
+        const updated = { ...prev };
+
+        Object.keys(updated).forEach((serviceId) => {
+          if (updated[serviceId]?.staffId === uid) {
+            delete updated[serviceId];
+          }
+        });
+
+        return updated;
+      });
+
+      setOriginalAssignments((prev) => {
+        const updated = { ...prev };
+
+        Object.keys(updated).forEach((serviceId) => {
+          if (updated[serviceId]?.staffId === uid) {
+            delete updated[serviceId];
+          }
+        });
+
+        return updated;
+      });
+
+      setSuccessMsg(
+        'Staff record removed successfully. Related service assignments have been cleared.'
+      );
 
       await fetchStaff();
     } catch (err) {
       setError('Failed to delete staff: ' + err.message);
     }
+  };
+
+  // Handle changing the assigned staff member for a service
+  const handleServiceAssignmentChange = (serviceId, staffId) => {
+    setServiceAssignments((prev) => {
+      const updated = { ...prev };
+
+      if (!staffId) {
+        delete updated[serviceId];
+        return updated;
+      }
+
+      const selectedStaff = assignableStaff.find(
+        (staff) => staff.id === staffId
+      );
+
+      if (!selectedStaff) {
+        return prev;
+      }
+
+      updated[serviceId] = {
+        staffId: selectedStaff.id,
+        staffName: selectedStaff.name,
+        staffEmail: selectedStaff.email
+      };
+
+      return updated;
+    });
+
+    setError('');
+    setSuccessMsg('');
+  };
+
+  // Save all SWDS service assignments to Firestore
+  const handleSaveAssignments = async () => {
+    setError('');
+    setSuccessMsg('');
+
+    setSavingAssignments(true);
+
+    try {
+      const updatedAssignments = {};
+
+      // Validate each selected staff member before saving
+      for (const service of SWDS_SERVICES) {
+        const assignment = serviceAssignments[service.id];
+
+        if (!assignment?.staffId) {
+          continue;
+        }
+
+        const selectedStaff = assignableStaff.find(
+          (staff) => staff.id === assignment.staffId
+        );
+
+        if (!selectedStaff) {
+          throw new Error(
+            `The assigned staff member for "${service.name}" is no longer available. Please select another staff member.`
+          );
+        }
+
+        updatedAssignments[service.id] = {
+          staffId: selectedStaff.id,
+          staffName: selectedStaff.name,
+          staffEmail: selectedStaff.email
+        };
+      }
+
+      const assignmentRef = doc(
+        db,
+        ASSIGNMENT_DOC,
+        ASSIGNMENT_DOC_ID
+      );
+
+      await setDoc(assignmentRef, {
+        office: DEFAULT_STAFF_OFFICE,
+        assignments: updatedAssignments,
+        updatedAt: serverTimestamp()
+      });
+
+      setServiceAssignments(updatedAssignments);
+      setOriginalAssignments(updatedAssignments);
+
+      setSuccessMsg(
+        'SWDS service assignments successfully saved!'
+      );
+    } catch (err) {
+      console.error('Error saving SWDS assignments:', err);
+      setError('Failed to save service assignments: ' + err.message);
+    } finally {
+      setSavingAssignments(false);
+    }
+  };
+
+  // Reset unsaved assignment changes
+  const handleResetAssignments = () => {
+    setServiceAssignments(originalAssignments);
+    setError('');
+    setSuccessMsg('Unsaved assignment changes have been discarded.');
+  };
+
+  // Check if there are unsaved changes
+  const hasAssignmentChanges =
+    JSON.stringify(serviceAssignments) !==
+    JSON.stringify(originalAssignments);
+
+  // Count assignments per staff member
+  const getStaffAssignmentCount = (staffId) => {
+    return Object.values(serviceAssignments).filter(
+      (assignment) => assignment?.staffId === staffId
+    ).length;
   };
 
   // Filter staff list based on search term
@@ -196,6 +496,12 @@ export default function Staff() {
       staff.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       staff.office?.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  const assignedServiceCount = Object.keys(serviceAssignments).filter(
+    (serviceId) =>
+      SWDS_SERVICES.some((service) => service.id === serviceId) &&
+      serviceAssignments[serviceId]?.staffId
+  ).length;
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-12 animate-[fadeIn_2s_ease-in-out]">
@@ -215,7 +521,7 @@ export default function Staff() {
           </h1>
 
           <p className="text-sm text-slate-500 mt-1">
-            Create administrative accounts, manage office assignments, and monitor active personnel.
+            Create administrative accounts, manage office assignments, assign SWDS services, and monitor active personnel.
           </p>
         </div>
 
@@ -241,6 +547,216 @@ export default function Staff() {
           <span>{successMsg}</span>
         </div>
       )}
+
+      {/* SWDS Service Assignment Management */}
+      <div className="bg-white p-6 rounded-2xl shadow-xs border border-slate-200/60 space-y-6">
+
+        {/* Assignment Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-4 border-b border-slate-100">
+          <div>
+            <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Briefcase className="w-5 h-5 text-sky-600" />
+              SWDS Service Assignments
+            </h2>
+
+            <p className="text-sm text-slate-500 mt-1">
+              Assign Glenn, Shenyl, and Patricia to manage the different SWDS services.
+              A staff member can handle multiple services.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 bg-sky-50 text-sky-800 px-4 py-2 rounded-xl text-sm font-semibold border border-sky-100">
+            <UserCheck className="w-4 h-4" />
+            {assignedServiceCount} / {SWDS_SERVICES.length} Assigned
+          </div>
+        </div>
+
+        {/* Staff Assignment Summary */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {ASSIGNABLE_STAFF_EMAILS.map((staffEmail) => {
+            const staff = assignableStaff.find(
+              (item) =>
+                item.email?.toLowerCase() === staffEmail
+            );
+
+            const assignmentCount = staff
+              ? getStaffAssignmentCount(staff.id)
+              : 0;
+
+            const fallbackNames = {
+              'staff.ssu.glenn@gmail.com': 'Glenn',
+              'staff.ssu.shenyl@gmail.com': 'Shenyl',
+              'staff.ssu.patricia@gmail.com': 'Patricia'
+            };
+
+            return (
+              <div
+                key={staffEmail}
+                className="p-4 rounded-xl border border-slate-200 bg-slate-50/70"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
+                      <User className="w-4 h-4" />
+                    </div>
+
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900 truncate">
+                        {staff?.name || fallbackNames[staffEmail]}
+                      </p>
+
+                      <p className="text-xs text-slate-500 truncate">
+                        {staffEmail}
+                      </p>
+                    </div>
+                  </div>
+
+                  <span className="text-xs font-bold text-sky-700 bg-sky-100 px-2.5 py-1 rounded-lg whitespace-nowrap">
+                    {assignmentCount} {assignmentCount === 1 ? 'Service' : 'Services'}
+                  </span>
+                </div>
+
+                {!staff && (
+                  <p className="text-xs text-amber-600 mt-3">
+                    Staff account not found in the registered directory.
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Service Assignment List */}
+        <div>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-800">
+                Service Assignment Directory
+              </h3>
+
+              <p className="text-xs text-slate-500 mt-1">
+                Select which staff member is responsible for each service.
+              </p>
+            </div>
+
+            <span className="text-xs text-slate-400">
+              {SWDS_SERVICES.length} SWDS Services
+            </span>
+          </div>
+
+          {loadingAssignments ? (
+            <div className="flex items-center justify-center py-12 text-slate-500 gap-2">
+              <Loader2 className="w-5 h-5 animate-spin text-sky-600" />
+              <span className="text-sm">Loading service assignments...</span>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {SWDS_SERVICES.map((service, index) => {
+                const currentAssignment =
+                  serviceAssignments[service.id];
+
+                const assignedStaff = assignableStaff.find(
+                  (staff) => staff.id === currentAssignment?.staffId
+                );
+
+                return (
+                  <div
+                    key={service.id}
+                    className="flex flex-col md:flex-row md:items-center gap-3 p-4 rounded-xl border border-slate-200 hover:border-sky-200 hover:bg-sky-50/30 transition-all"
+                  >
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                      <div className="w-9 h-9 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center text-sm font-bold shrink-0">
+                        {index + 1}
+                      </div>
+
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-slate-800">
+                          {service.name}
+                        </p>
+
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          {assignedStaff
+                            ? `Assigned to ${assignedStaff.name}`
+                            : currentAssignment?.staffName
+                              ? 'Previously assigned staff is unavailable'
+                              : 'No staff assigned yet'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="w-full md:w-72 shrink-0">
+                      <select
+                        value={assignedStaff?.id || ''}
+                        onChange={(e) =>
+                          handleServiceAssignmentChange(
+                            service.id,
+                            e.target.value
+                          )
+                        }
+                        disabled={assignableStaff.length === 0}
+                        className="w-full px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500 transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        <option value="">
+                          -- Unassigned --
+                        </option>
+
+                        {assignableStaff.map((staff) => (
+                          <option
+                            key={staff.id}
+                            value={staff.id}
+                          >
+                            {staff.name} ({staff.email})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Assignment Actions */}
+          {!loadingAssignments && (
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mt-6 pt-5 border-t border-slate-100">
+              <p className="text-xs text-slate-500">
+                Changes will only take effect after saving.
+              </p>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleResetAssignments}
+                  disabled={!hasAssignmentChanges || savingAssignments}
+                  className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Reset Changes
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSaveAssignments}
+                  disabled={!hasAssignmentChanges || savingAssignments || assignableStaff.length === 0}
+                  className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-sky-600 hover:bg-sky-700 transition-all shadow-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {savingAssignments ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      Save Assignments
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Grid Layout: Add Form & Staff Directory */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

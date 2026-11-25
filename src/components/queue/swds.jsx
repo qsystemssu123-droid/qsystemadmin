@@ -1,3 +1,4 @@
+
 import { useEffect, useState, useRef } from "react";
 import emailjs from "@emailjs/browser";
 
@@ -16,7 +17,6 @@ import {
 
 import {
   doc,
-  getDoc,
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
@@ -188,7 +188,6 @@ const isValidFeedbackReference = (reference) => {
 };
 
 // Build a personalized feedback URL.
-// The PublicFeedback page expects the reference in the "token" parameter.
 const buildPersonalizedFeedbackLink = (item) => {
   const reference = getFeedbackReference(item);
 
@@ -208,11 +207,7 @@ const buildPersonalizedFeedbackLink = (item) => {
   }
 
   const url = new URL(FEEDBACK_LINK);
-
-  // IMPORTANT: Use token, not reference.
-  // Expected format:
-  // /public-feedback?token=48-character-reference
-  url.searchParams.set("token", reference);
+  url.searchParams.set("reference", reference);
 
   return url.toString();
 };
@@ -257,8 +252,7 @@ const sendWalkInCompletionEmail = async (item, officeName) => {
     );
   }
 
-  // Generate the personalized feedback link using
-  // the latest appointment data retrieved from Firestore.
+  // Generate the personalized feedback link for this specific walk-in.
   const personalizedFeedbackLink =
     buildPersonalizedFeedbackLink(item);
 
@@ -307,9 +301,7 @@ const sendWalkInCompletionEmail = async (item, officeName) => {
       }
     );
 
-    throw new Error(getEmailJSErrorMessage(error), {
-      cause: error,
-    });
+    throw new Error(getEmailJSErrorMessage(error), { cause: error });
   }
 };
 
@@ -1062,39 +1054,15 @@ export default function Swds({
         }
       );
 
-      // Send an email only if the LATEST Firestore appointment
-      // record identifies this appointment as a walk-in.
-      // This avoids relying on potentially stale React state.
+      // Send an email only if this appointment is a walk-in.
+      // Online appointments are skipped.
       let emailMessage = "";
 
-      try {
-        const appointmentRef = doc(
-          db,
-          "appointments",
-          item.id
-        );
-
-        // Fetch the latest appointment record after completion.
-        const latestAppointmentSnapshot =
-          await getDoc(appointmentRef);
-
-        if (!latestAppointmentSnapshot.exists()) {
-          throw new Error(
-            "The completed appointment could not be retrieved from Firestore. " +
-            "The feedback email could not be prepared."
-          );
-        }
-
-        const latestAppointment = {
-          ...latestAppointmentSnapshot.data(),
-          id: latestAppointmentSnapshot.id,
-        };
-
-        // Only walk-in appointments receive the completion email.
-        if (isWalkInAppointment(latestAppointment)) {
+      if (isWalkInAppointment(item)) {
+        try {
           const emailResult =
             await sendWalkInCompletionEmail(
-              latestAppointment,
+              item,
               officeName
             );
 
@@ -1102,18 +1070,16 @@ export default function Swds({
             emailMessage =
               ` A completion email was successfully sent to ${emailResult.email}.`;
           }
-        }
-      } catch (emailError) {
-        console.error(
-          "Walk-in completion email failed:",
-          emailError
-        );
+        } catch (emailError) {
+          console.error(
+            "Walk-in completion email failed:",
+            emailError
+          );
 
-        // The appointment remains completed even if the email fails.
-        emailMessage =
-          ` However, the completion email failed: ${
-            emailError?.message || "Unknown email error"
-          }`;
+          // The appointment remains completed even if the email fails.
+          emailMessage =
+            ` However, the completion email failed: ${emailError?.message || "Unknown email error"}`;
+        }
       }
 
       setActionSuccess(
