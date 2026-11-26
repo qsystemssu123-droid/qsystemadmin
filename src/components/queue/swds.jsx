@@ -27,7 +27,12 @@ import WalkIn from "./walk-in";
 const OFFICE_NAME = "SWDS";
 const PUBLIC_QUEUE_COLLECTION = "queues";
 const PHILIPPINE_TIME_ZONE = "Asia/Manila";
-const COUNSELING_SERVICE = "Guidance & Counseling Services";
+
+// Both service names require staff confirmation.
+const COUNSELING_SERVICES = [
+  "Guidance & Counseling Services",
+  "Guidance and Counseling Services",
+];
 
 // EmailJS configuration
 const EMAILJS_SERVICE_ID = "service_20wm2tz";
@@ -36,6 +41,115 @@ const EMAILJS_PUBLIC_KEY = "P8vS1-WoC60N-hGPD";
 
 const FEEDBACK_LINK =
   "https://qsystem-admin.netlify.app/public-feedback";
+
+// Normalize service names before comparing them.
+const normalizeServiceName = (value) =>
+  typeof value === "string"
+    ? value.trim().replace(/\s+/g, " ").toLowerCase()
+    : "";
+
+// Supports both old single-service records and the updated
+// mobile app's multiple-service object structure.
+const getAppointmentServices = (item) => {
+  const services = [];
+
+  const addService = (value) => {
+    if (typeof value === "string") {
+      const normalized = value.trim();
+
+      if (normalized) {
+        services.push(normalized);
+      }
+
+      return;
+    }
+
+    if (value && typeof value === "object") {
+      const serviceName =
+        value.serviceName ||
+        value.name ||
+        value.label ||
+        value.service ||
+        value.title;
+
+      if (
+        typeof serviceName === "string" &&
+        serviceName.trim()
+      ) {
+        services.push(serviceName.trim());
+      }
+    }
+  };
+
+  // Updated mobile app: services is an array of service objects.
+  if (Array.isArray(item?.services)) {
+    item.services.forEach(addService);
+  }
+
+  // Support other possible service-list fields.
+  if (Array.isArray(item?.selectedServices)) {
+    item.selectedServices.forEach(addService);
+  }
+
+  if (Array.isArray(item?.serviceNames)) {
+    item.serviceNames.forEach(addService);
+  }
+
+  // Support older single-service records.
+  if (
+    typeof item?.service === "string" &&
+    item.service.trim()
+  ) {
+    item.service
+      .split(",")
+      .forEach(addService);
+  }
+
+  // Support a direct serviceName field if present.
+  if (
+    typeof item?.serviceName === "string" &&
+    item.serviceName.trim()
+  ) {
+    addService(item.serviceName);
+  }
+
+  // Remove duplicate service names without changing their order.
+  return [...new Set(services)];
+};
+
+const getServiceLabel = (item) => {
+  const services = getAppointmentServices(item);
+
+  return services.length
+    ? services.join(", ")
+    : item?.reason || "Appointment";
+};
+
+// An appointment requires staff confirmation if ANY selected service
+// matches either supported Guidance and Counseling service name.
+const requiresCounselingConfirmation = (item) => {
+  const selectedServices = getAppointmentServices(item).map(
+    normalizeServiceName
+  );
+
+  const counselingNames = COUNSELING_SERVICES.map(
+    normalizeServiceName
+  );
+
+  return selectedServices.some((service) =>
+    counselingNames.includes(service)
+  );
+};
+
+// The automatic-approval transaction must recheck the latest
+// Firestore service data instead of relying only on the UI snapshot.
+const assertAutomaticApprovalAllowed = (appointmentData) => {
+  if (requiresCounselingConfirmation(appointmentData)) {
+    throw new Error(
+      "This appointment includes Guidance and Counseling Services. It must remain pending until staff explicitly accepts it."
+    );
+  }
+};
 
 // The queue is numbered separately for each Philippine calendar day.
 const getManilaDateKey = (date = new Date()) => {
@@ -50,43 +164,6 @@ const getManilaDateKey = (date = new Date()) => {
     parts.find((part) => part.type === type)?.value || "";
 
   return `${value("year")}-${value("month")}-${value("day")}`;
-};
-
-// Supports both old single-service records and new multiple-service records.
-const getAppointmentServices = (item) => {
-  if (Array.isArray(item?.services)) {
-    return item.services
-      .filter((service) => typeof service === "string")
-      .map((service) => service.trim())
-      .filter(Boolean);
-  }
-
-  if (typeof item?.service === "string" && item.service.trim()) {
-    return item.service
-      .split(",")
-      .map((service) => service.trim())
-      .filter(Boolean);
-  }
-
-  return [];
-};
-
-const getServiceLabel = (item) => {
-  const services = getAppointmentServices(item);
-
-  return services.length
-    ? services.join(", ")
-    : item?.reason || "Appointment";
-};
-
-// An appointment requires staff confirmation if ANY selected service
-// includes Guidance & Counseling Services.
-const requiresCounselingConfirmation = (item) => {
-  return getAppointmentServices(item).some(
-    (service) =>
-      service.trim().toLowerCase() ===
-      COUNSELING_SERVICE.toLowerCase()
-  );
 };
 
 // Identify walk-in appointments using the available registration markers.
@@ -524,6 +601,13 @@ export default function Swds({
   // Prevent repeated automatic approval attempts for the same appointment.
   const autoApprovalAttempted = useRef(new Set());
 
+  // Keep the latest appointments available to asynchronous callbacks.
+  const appointmentsRef = useRef(appointments);
+
+  useEffect(() => {
+    appointmentsRef.current = appointments;
+  }, [appointments]);
+
   // Refresh the visible queue after midnight.
   useEffect(() => {
     const interval = setInterval(() => {
@@ -569,7 +653,8 @@ export default function Swds({
     .filter(isPending)
     .sort((a, b) => getTimestamp(a) - getTimestamp(b));
 
-  // Only counseling appointments require staff confirmation.
+  // ONLY appointments containing either supported counseling service
+  // remain pending for staff confirmation.
   const pendingAppointments = allPendingAppointments.filter(
     requiresCounselingConfirmation
   );
@@ -581,7 +666,7 @@ export default function Swds({
   const normalPendingAppointments =
     pendingAppointments.filter((item) => !item.isPriority);
 
-  // Non-counseling appointments are automatically approved.
+  // Appointments without either counseling service are automatically approved.
   const automaticApprovalAppointments =
     allPendingAppointments.filter(
       (item) => !requiresCounselingConfirmation(item)
@@ -625,12 +710,21 @@ export default function Swds({
 
   // Staff accepts counseling bookings.
   // Only now is a queue number created.
-  const handleAcceptAppointment = async (item) => {
+  const handleAcceptAppointment = async (
+    item,
+    options = {}
+  ) => {
     if (processingId) return;
+
+    const isAutomatic = options.automatic === true;
 
     const currentStaff = auth.currentUser;
 
     if (!currentStaff) {
+      if (isAutomatic) {
+        autoApprovalAttempted.current.delete(item.id);
+      }
+
       setActionError(
         "Your session has expired. Please log in again."
       );
@@ -702,6 +796,13 @@ export default function Swds({
             );
           }
 
+          // Critical protection:
+          // An automatic approval must NEVER approve an appointment
+          // containing either Guidance and Counseling service name.
+          if (isAutomatic) {
+            assertAutomaticApprovalAllowed(appointmentData);
+          }
+
           const dateKey = getManilaDateKey();
 
           const counterData = counterSnapshot.exists()
@@ -715,7 +816,7 @@ export default function Swds({
 
           const highestToday = Math.max(
             0,
-            ...officeAppointments
+            ...appointmentsRef.current
               .filter(
                 (appointment) =>
                   appointment.id !== item.id &&
@@ -812,6 +913,13 @@ export default function Swds({
         error
       );
 
+      if (isAutomatic) {
+        // Allow another attempt if the automatic operation failed.
+        // Counseling appointments will not be retried because they
+        // are excluded from the automatic-approval list.
+        autoApprovalAttempted.current.delete(item.id);
+      }
+
       setActionError(
         error?.message || "Failed to accept appointment."
       );
@@ -821,9 +929,10 @@ export default function Swds({
   };
 
   // Automatically approve appointments that do NOT include
-  // Guidance & Counseling Services.
+  // either Guidance & Counseling Services or Guidance and Counseling Services.
   //
-  // Counseling appointments remain pending for staff confirmation.
+  // Appointments containing either counseling service remain pending
+  // until staff explicitly accepts them.
   useEffect(() => {
     if (processingId) return;
 
@@ -835,11 +944,12 @@ export default function Swds({
 
     if (!nextAppointment) return;
 
-    autoApprovalAttempted.current.add(
-      nextAppointment.id
-    );
+    // Mark before starting the async operation to prevent duplicate attempts.
+    autoApprovalAttempted.current.add(nextAppointment.id);
 
-    handleAcceptAppointment(nextAppointment);
+    handleAcceptAppointment(nextAppointment, {
+      automatic: true,
+    });
   }, [appointments, processingId]);
 
   // Explicit staff action to begin serving.
@@ -1459,7 +1569,7 @@ export default function Swds({
             </div>
 
             <p className="text-xs text-slate-500 mb-4">
-              Only bookings that include Guidance & Counseling Services require staff confirmation. Other services are automatically queued.
+              Only bookings that include Guidance & Counseling Services or Guidance and Counseling Services require staff confirmation. Other services are automatically queued.
             </p>
 
             {normalPendingAppointments.length === 0 ? (
