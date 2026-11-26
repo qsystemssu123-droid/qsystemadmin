@@ -30,7 +30,9 @@ import {
 } from "lucide-react";
 
 import APP_LOGO from "../assets/QueueMatrix.png";
-const APK_DOWNLOAD_URL = "/QueueMatrix.apk";
+
+const APK_DOWNLOAD_URL =
+  "https://github.com/qsystemssu123-droid/qsystemadmin/releases/download/v1.0.0/QueueMatrix.apk";
 
 const APP_NAME = "QueueMatrix";
 const APP_VERSION = "1.0.0";
@@ -64,42 +66,35 @@ export default function AppDownload() {
     setDownloadStarted(false);
 
     try {
-      // Give the loading animation time to appear.
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Allow the loading animation to appear before starting the download.
+      await new Promise((resolve) => setTimeout(resolve, 500));
 
-      const link = document.createElement("a");
-
-      link.href = APK_DOWNLOAD_URL;
-      link.download = "QueueMatrix.apk";
-      link.rel = "noopener noreferrer";
-
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      // Navigate directly to the GitHub Release asset.
+      // GitHub handles the APK download through its release download response.
+      window.location.assign(APK_DOWNLOAD_URL);
 
       setDownloadStarted(true);
 
       // Keep the confirmation visible briefly.
-      setTimeout(() => {
+      window.setTimeout(() => {
         setDownloadStarted(false);
       }, 6000);
     } catch (error) {
       console.error("APK download error:", error);
 
-      window.open(
-        APK_DOWNLOAD_URL,
-        "_blank",
-        "noopener,noreferrer"
+      setIsDownloading(false);
+
+      alert(
+        "Unable to start the QueueMatrix download. Please try again or open the download link directly."
       );
 
-      setDownloadStarted(true);
-
-      setTimeout(() => {
-        setDownloadStarted(false);
-      }, 6000);
-    } finally {
-      setIsDownloading(false);
+      return;
     }
+
+    // Reset the button state after the download request has started.
+    window.setTimeout(() => {
+      setIsDownloading(false);
+    }, 1500);
   };
 
   const features = [
@@ -268,10 +263,7 @@ export default function AppDownload() {
     <>
       {isDownloading ? (
         <>
-          <LoaderCircle
-            size={19}
-            className="animate-spin"
-          />
+          <LoaderCircle size={19} className="animate-spin" />
           Preparing Download...
         </>
       ) : (
