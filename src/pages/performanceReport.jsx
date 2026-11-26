@@ -1,3 +1,4 @@
+
 import { useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
@@ -14,7 +15,9 @@ import {
   Loader2,
   CheckCircle2,
   Clock,
-  Activity
+  Activity,
+  Globe,
+  Footprints,
 } from 'lucide-react';
 import {
   collection,
@@ -42,7 +45,78 @@ const normalizeService = (service) => {
   return String(service || '')
     .trim()
     .replace(/\s+/g, ' ')
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/\band\b/g, '&')
+    .replace(/\s*&\s*/g, ' & ');
+};
+
+// Match variations of service names to the official directory names.
+const getCanonicalServiceName = (service) => {
+  const normalized = normalizeService(service);
+
+  const matchingService = SWDS_SERVICES.find(
+    (serviceName) => normalizeService(serviceName) === normalized
+  );
+
+  return matchingService || String(service || '').trim();
+};
+
+// Extract individual requested services from an appointment.
+// Supports arrays, comma-separated values, and pipe-separated values.
+const getRequestedServices = (appointment) => {
+  const serviceValue = appointment?.service;
+
+  if (Array.isArray(serviceValue)) {
+    return serviceValue
+      .flatMap((value) =>
+        String(value || '').split(/\s*[|,]\s*/)
+      )
+      .map((value) => getCanonicalServiceName(value))
+      .filter(Boolean);
+  }
+
+  if (typeof serviceValue === 'string') {
+    return serviceValue
+      .split(/\s*[|,]\s*/)
+      .map((value) => getCanonicalServiceName(value))
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+// Identify whether an appointment is Online or Walk-In.
+const getBookingChannel = (appointment) => {
+  if (!appointment || typeof appointment !== 'object') {
+    return 'online';
+  }
+
+  const normalize = (value) =>
+    String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_]+/g, '-');
+
+  const bookingType = normalize(
+    appointment.bookingType ||
+    appointment.bookingMode ||
+    appointment.source ||
+    appointment.channel ||
+    appointment.type ||
+    appointment.appointmentType ||
+    appointment.registrationType
+  );
+
+  const isWalkIn =
+    appointment.isWalkIn === true ||
+    bookingType.includes('walk-in') ||
+    bookingType.includes('walkin') ||
+    Boolean(
+      appointment.registeredBy ||
+      appointment.registeredByEmail
+    );
+
+  return isWalkIn ? 'walk-in' : 'online';
 };
 
 // Convert Firestore Timestamp, Date, number, or string to milliseconds.
@@ -166,8 +240,6 @@ export default function PerformanceReport({
 }) {
   const [firestoreAppointments, setFirestoreAppointments] = useState([]);
 
-  // Track Firestore subscription status without setting state
-  // synchronously inside the effect.
   const [firestoreState, setFirestoreState] = useState({
     status: 'loading',
     error: ''
@@ -193,7 +265,6 @@ export default function PerformanceReport({
       ? filteredAppointments
       : null;
 
-  // Derive loading and error states from the data source.
   const loading =
     !hasProvidedAppointments &&
     firestoreState.status === 'loading';
@@ -259,9 +330,12 @@ export default function PerformanceReport({
         .trim()
         .toUpperCase();
 
-      const service = String(appointment?.service || '').trim();
+      const requestedServices = getRequestedServices(appointment);
 
-      return office === OFFICE_NAME && service.length > 0;
+      return (
+        office === OFFICE_NAME &&
+        requestedServices.length > 0
+      );
     });
   }, [sourceAppointments]);
 
@@ -316,29 +390,28 @@ export default function PerformanceReport({
     });
   }, [swdsAppointments, period]);
 
-  // Count requested services using the actual appointment.service field.
+  // Count each individual requested service.
+  // An appointment requesting three services adds one request to each service.
   const serviceStatistics = useMemo(() => {
     const serviceMap = new Map();
 
     periodAppointments.forEach((appointment) => {
-      const originalService = String(
-        appointment?.service || ''
-      ).trim();
+      const requestedServices = getRequestedServices(appointment);
 
-      if (!originalService) return;
+      requestedServices.forEach((originalService) => {
+        const normalized = normalizeService(originalService);
 
-      const normalized = normalizeService(originalService);
+        if (!normalized) return;
 
-      if (!normalized) return;
+        if (!serviceMap.has(normalized)) {
+          serviceMap.set(normalized, {
+            name: originalService,
+            count: 0
+          });
+        }
 
-      if (!serviceMap.has(normalized)) {
-        serviceMap.set(normalized, {
-          name: originalService,
-          count: 0
-        });
-      }
-
-      serviceMap.get(normalized).count += 1;
+        serviceMap.get(normalized).count += 1;
+      });
     });
 
     return Array.from(serviceMap.values()).sort((a, b) => {
@@ -349,8 +422,15 @@ export default function PerformanceReport({
     });
   }, [periodAppointments]);
 
+  // Total individual service requests.
+  const totalIndividualServiceRequests = useMemo(() => {
+    return serviceStatistics.reduce(
+      (total, service) => total + service.count,
+      0
+    );
+  }, [serviceStatistics]);
+
   // Determine the most requested service.
-  // All services with the same highest count are included.
   const mostRequestedServices = useMemo(() => {
     if (serviceStatistics.length === 0) {
       return [];
@@ -390,19 +470,25 @@ export default function PerformanceReport({
       );
     }).length;
 
-    const uniqueServices = new Set(
-      periodAppointments
-        .map((appointment) => normalizeService(appointment?.service))
-        .filter(Boolean)
-    ).size;
+    const uniqueServices = serviceStatistics.length;
+
+    const onlineBookings = periodAppointments.filter(
+      (appointment) => getBookingChannel(appointment) === 'online'
+    ).length;
+
+    const walkInBookings = periodAppointments.filter(
+      (appointment) => getBookingChannel(appointment) === 'walk-in'
+    ).length;
 
     return {
       totalRequests,
       completed,
       pending,
-      uniqueServices
+      uniqueServices,
+      onlineBookings,
+      walkInBookings
     };
-  }, [periodAppointments]);
+  }, [periodAppointments, serviceStatistics]);
 
   // Search the service ranking without changing the total percentage base.
   const displayedServices = useMemo(() => {
@@ -419,28 +505,14 @@ export default function PerformanceReport({
     );
   }, [serviceStatistics, searchTerm]);
 
-  // Directory counts for the predefined SWDS services.
-  const serviceDirectory = useMemo(() => {
-    return SWDS_SERVICES.map((serviceName) => {
-      const matchingService = serviceStatistics.find(
-        (service) =>
-          normalizeService(service.name) ===
-          normalizeService(serviceName)
-      );
-
-      return {
-        name: serviceName,
-        count: matchingService?.count || 0
-      };
-    });
-  }, [serviceStatistics]);
-
   const maxServiceCount = serviceStatistics[0]?.count || 1;
 
   const getServicePercentage = (count) => {
-    if (summary.totalRequests === 0) return 0;
+    if (totalIndividualServiceRequests === 0) return 0;
 
-    return (count / summary.totalRequests) * 100;
+    return (
+      (count / totalIndividualServiceRequests) * 100
+    );
   };
 
   // Numeric-leading object keys must be quoted.
@@ -562,14 +634,14 @@ export default function PerformanceReport({
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
 
         {/* Total Requests */}
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex items-start justify-between">
             <div>
               <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Total Service Requests
+                Total Bookings
               </p>
 
               <h2 className="mt-3 text-3xl font-black text-slate-900">
@@ -583,6 +655,52 @@ export default function PerformanceReport({
 
             <div className="rounded-xl bg-sky-50 p-3 text-sky-600">
               <ClipboardList className="h-5 w-5" />
+            </div>
+          </div>
+        </div>
+
+        {/* Online Bookings */}
+        <div className="rounded-2xl border border-sky-100 bg-white p-5 shadow-sm">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                Online Bookings
+              </p>
+
+              <h2 className="mt-3 text-3xl font-black text-sky-700">
+                {formatNumber(summary.onlineBookings)}
+              </h2>
+
+              <p className="mt-1 text-[11px] text-slate-400">
+                Online appointment records
+              </p>
+            </div>
+
+            <div className="rounded-xl bg-sky-50 p-3 text-sky-600">
+              <Globe className="h-5 w-5" />
+            </div>
+          </div>
+        </div>
+
+        {/* Walk-In Bookings */}
+        <div className="rounded-2xl border border-violet-100 bg-white p-5 shadow-sm">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                Walk-In Bookings
+              </p>
+
+              <h2 className="mt-3 text-3xl font-black text-violet-700">
+                {formatNumber(summary.walkInBookings)}
+              </h2>
+
+              <p className="mt-1 text-[11px] text-slate-400">
+                Walk-in registration records
+              </p>
+            </div>
+
+            <div className="rounded-xl bg-violet-50 p-3 text-violet-600">
+              <Footprints className="h-5 w-5" />
             </div>
           </div>
         </div>
@@ -669,7 +787,7 @@ export default function PerformanceReport({
           </div>
 
           <p className="mt-1 text-xs text-slate-500">
-            Based on the number of SWDS appointments requesting each service
+            Based on individual services requested across SWDS appointments
           </p>
         </div>
 
@@ -751,7 +869,7 @@ export default function PerformanceReport({
             </h2>
 
             <p className="mt-1 text-xs text-slate-500">
-              Actual requested services ranked by appointment count
+              Individual requested services ranked by appointment count
             </p>
           </div>
 
@@ -773,6 +891,7 @@ export default function PerformanceReport({
             <div className="space-y-5">
               {displayedServices.map((service, index) => {
                 const percentage = getServicePercentage(service.count);
+
                 const isTopService =
                   service.count === mostRequestedCount;
 
@@ -855,57 +974,8 @@ export default function PerformanceReport({
 
         <div className="border-t border-slate-100 bg-slate-50/70 px-6 py-3">
           <p className="text-[11px] text-slate-400">
-            Percentages are calculated using all SWDS requests in the selected period.
+            Percentages are calculated using all individual service requests in the selected period. One appointment may contribute to multiple services.
           </p>
-        </div>
-      </div>
-
-      {/* SWDS Service Directory */}
-      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-2 border-b border-slate-100 p-6 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="flex items-center gap-2 text-lg font-black text-slate-900">
-              <BriefcaseBusiness className="h-5 w-5 text-sky-600" />
-              SWDS Service Directory
-            </h2>
-
-            <p className="mt-1 text-xs text-slate-500">
-              Request counts for the listed SWDS services
-            </p>
-          </div>
-
-          <span className="self-start rounded-lg bg-sky-50 px-3 py-1.5 text-[11px] font-bold text-sky-700">
-            {SWDS_SERVICES.length} Listed Services
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 p-6 sm:grid-cols-2">
-          {serviceDirectory.map((service, index) => (
-            <div
-              key={normalizeService(service.name)}
-              className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50/70 p-4 transition hover:border-sky-200 hover:bg-sky-50/50"
-            >
-              <div className="flex min-w-0 items-center gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-xs font-black text-slate-500 shadow-sm">
-                  {index + 1}
-                </div>
-
-                <p className="break-words text-xs font-bold leading-relaxed text-slate-700">
-                  {service.name}
-                </p>
-              </div>
-
-              <div className="shrink-0 text-right">
-                <p className="text-lg font-black tabular-nums text-slate-900">
-                  {formatNumber(service.count)}
-                </p>
-
-                <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400">
-                  {service.count === 1 ? 'Request' : 'Requests'}
-                </p>
-              </div>
-            </div>
-          ))}
         </div>
       </div>
 

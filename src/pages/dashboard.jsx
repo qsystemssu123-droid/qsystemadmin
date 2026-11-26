@@ -1,3 +1,4 @@
+
 import { useState, useEffect } from 'react';
 import {
   collection,
@@ -20,7 +21,6 @@ import {
 import { db } from '../services/firebase.js';
 import { useDashboardData } from '../hooks/useDashboardData.js';
 import { calculateDashboardMetrics } from '../utils/dashboardCalculations.js';
-import { REGISTERED_USERS } from '../data/mockData.js';
 
 import DashboardHeader from '../components/dashboard/DashboardHeader.jsx';
 import MetricCards from '../components/dashboard/MetricCards.jsx';
@@ -29,6 +29,8 @@ import OfficeDistribution from '../components/dashboard/OfficeDistribution.jsx';
 import ThreeOfficesPieChart from '../components/dashboard/ThreeOfficesPieChart.jsx';
 import RegisteredUsersList from '../components/dashboard/RegisteredUsersList.jsx';
 import DashboardLoading from '../components/dashboard/DashboardLoading.jsx';
+
+const PHILIPPINE_TIME_ZONE = 'Asia/Manila';
 
 // Normalize appointment status values.
 const normalizeStatus = (status) =>
@@ -41,8 +43,176 @@ const normalizeStatus = (status) =>
 const normalizeQueueNumber = (value) =>
   String(value || '').trim();
 
+// Get the current Philippine date and time.
+const getManilaDateTime = () => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: PHILIPPINE_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(new Date());
+
+  const value = (type) =>
+    parts.find((part) => part.type === type)?.value || '';
+
+  const hour = Number(value('hour'));
+  const minute = Number(value('minute'));
+
+  return {
+    date: `${value('year')}-${value('month')}-${value('day')}`,
+    hour,
+    minutes: hour * 60 + minute
+  };
+};
+
+// Get the Philippine date key from a Date.
+const getManilaDateKey = (date) => {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: PHILIPPINE_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+
+  const value = (type) =>
+    parts.find((part) => part.type === type)?.value || '';
+
+  return `${value('year')}-${value('month')}-${value('day')}`;
+};
+
+// Get the effective appointment date.
+// Rescheduled date takes priority over the original date.
+const getScheduledDate = (item) => {
+  const value =
+    item?.rescheduledToDate ||
+    item?.appointmentDate ||
+    '';
+
+  if (!value) return '';
+
+  if (typeof value === 'string') {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : value;
+  }
+
+  const date =
+    typeof value?.toDate === 'function'
+      ? value.toDate()
+      : value instanceof Date
+        ? value
+        : null;
+
+  return date ? getManilaDateKey(date) : '';
+};
+
+// Get the effective appointment time.
+const getScheduledTime = (item) =>
+  item?.rescheduledToTime ||
+  item?.appointmentTime ||
+  '';
+
+// Convert 12-hour or 24-hour time into minutes.
+const convertTimeToMinutes = (time) => {
+  if (typeof time !== 'string' || !time.trim()) {
+    return null;
+  }
+
+  const normalized = time.trim().toUpperCase();
+
+  const twelveHourMatch = normalized.match(
+    /^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/
+  );
+
+  if (twelveHourMatch) {
+    let hours = Number(twelveHourMatch[1]);
+    const minutes = Number(twelveHourMatch[2]);
+    const period = twelveHourMatch[3];
+
+    if (
+      hours < 1 ||
+      hours > 12 ||
+      minutes < 0 ||
+      minutes > 59
+    ) {
+      return null;
+    }
+
+    if (period === 'AM') {
+      if (hours === 12) hours = 0;
+    } else if (hours !== 12) {
+      hours += 12;
+    }
+
+    return hours * 60 + minutes;
+  }
+
+  const twentyFourHourMatch = normalized.match(
+    /^(\d{1,2}):(\d{2})(?::\d{2})?$/
+  );
+
+  if (twentyFourHourMatch) {
+    const hours = Number(twentyFourHourMatch[1]);
+    const minutes = Number(twentyFourHourMatch[2]);
+
+    if (
+      hours < 0 ||
+      hours > 23 ||
+      minutes < 0 ||
+      minutes > 59
+    ) {
+      return null;
+    }
+
+    return hours * 60 + minutes;
+  }
+
+  return null;
+};
+
+// Check whether an appointment has a valid schedule.
+const hasValidAppointmentSchedule = (item) => {
+  const date = getScheduledDate(item);
+  const time = getScheduledTime(item);
+
+  return (
+    /^\d{4}-\d{2}-\d{2}$/.test(date) &&
+    convertTimeToMinutes(time) !== null
+  );
+};
+
+// Check whether an appointment is scheduled for a later time.
+const isAheadOfTimeAppointment = (item, currentDateTime) => {
+  if (!hasValidAppointmentSchedule(item)) {
+    return false;
+  }
+
+  const scheduledDate = getScheduledDate(item);
+
+  const scheduledMinutes = convertTimeToMinutes(
+    getScheduledTime(item)
+  );
+
+  if (scheduledDate > currentDateTime.date) {
+    return true;
+  }
+
+  if (scheduledDate < currentDateTime.date) {
+    return false;
+  }
+
+  return scheduledMinutes > currentDateTime.minutes;
+};
+
+// Check whether an appointment is already eligible by schedule.
+
 // Check whether an appointment is currently being served.
-// UPDATED: SWDS staff uses "in-progress".
 const isServing = (status) =>
   [
     'serving',
@@ -51,15 +221,29 @@ const isServing = (status) =>
     'inprogress'
   ].includes(normalizeStatus(status));
 
-// Check whether an appointment is waiting in the queue.
-// Pending appointments are intentionally excluded because
-// staff must accept them before assigning a queue number.
+// Check whether an appointment is approved and waiting.
+// Includes "approved - waiting" from the Later/Future display logic.
 const isWaiting = (status) =>
   [
     'accepted',
     'approved',
+    'approvedwaiting',
     'waiting',
     'queued'
+  ].includes(normalizeStatus(status));
+
+// Check whether a status represents a completed or inactive ticket.
+const isInactiveTicket = (status) =>
+  [
+    'completed',
+    'complete',
+    'done',
+    'cancelled',
+    'canceled',
+    'rejected',
+    'declined',
+    'noshow',
+    'served'
   ].includes(normalizeStatus(status));
 
 // Convert Firestore timestamps into milliseconds.
@@ -83,6 +267,120 @@ const getTimestamp = (value) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+// Get queue date using the same fields written by useSWDS.
+const getAppointmentQueueDate = (item) => {
+  if (
+    typeof item?.queueDate === 'string' &&
+    item.queueDate
+  ) {
+    return item.queueDate;
+  }
+
+  const possibleTimestamps = [
+    item?.approvedAt,
+    item?.createdAt,
+    item?.queueCreatedAt
+  ];
+
+  for (const value of possibleTimestamps) {
+    const date =
+      typeof value?.toDate === 'function'
+        ? value.toDate()
+        : typeof value?.seconds === 'number'
+          ? new Date(value.seconds * 1000)
+          : value instanceof Date
+            ? value
+            : value
+              ? new Date(value)
+              : null;
+
+    if (date && !Number.isNaN(date.getTime())) {
+      return getManilaDateKey(date);
+    }
+  }
+
+  return '';
+};
+
+// Get queue hour using the same fields written by useSWDS.
+const getAppointmentQueueHour = (item) => {
+  if (
+    item?.queueHour !== undefined &&
+    item?.queueHour !== null &&
+    item?.queueHour !== ''
+  ) {
+    const hour = Number(item.queueHour);
+
+    if (Number.isInteger(hour) && hour >= 0 && hour <= 23) {
+      return hour;
+    }
+  }
+
+  const possibleTimestamps = [
+    item?.approvedAt,
+    item?.createdAt,
+    item?.queueCreatedAt
+  ];
+
+  for (const value of possibleTimestamps) {
+    const date =
+      typeof value?.toDate === 'function'
+        ? value.toDate()
+        : typeof value?.seconds === 'number'
+          ? new Date(value.seconds * 1000)
+          : value instanceof Date
+            ? value
+            : value
+              ? new Date(value)
+              : null;
+
+    if (date && !Number.isNaN(date.getTime())) {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: PHILIPPINE_TIME_ZONE,
+        hour: '2-digit',
+        hourCycle: 'h23'
+      }).formatToParts(date);
+
+      const hour = Number(
+        parts.find((part) => part.type === 'hour')?.value
+      );
+
+      if (Number.isInteger(hour)) {
+        return hour;
+      }
+    }
+  }
+
+  return null;
+};
+
+// Check whether an appointment belongs to the current queue hour.
+const isTicketForCurrentHour = (
+  item,
+  currentDateTime
+) =>
+  getAppointmentQueueDate(item) === currentDateTime.date &&
+  getAppointmentQueueHour(item) === currentDateTime.hour;
+
+// Check whether an appointment belongs to SWDS.
+const belongsToSWDS = (item) => {
+  const office = String(
+    item?.office ||
+      item?.officeName ||
+      item?.department ||
+      ''
+  )
+    .trim()
+    .toLowerCase();
+
+  return (
+    office === 'swds' ||
+    office.startsWith('swds -') ||
+    office.startsWith('swds ') ||
+    office.includes('swds')
+  );
+};
+
 // Sort queue numbers naturally.
 const compareQueueNumbers = (a, b) =>
   normalizeQueueNumber(a?.queueNumber).localeCompare(
@@ -101,13 +399,22 @@ const normalizePublicTicket = (ticket) => {
   }
 
   const normalizedQueueNumber = normalizeQueueNumber(
-    ticket.queueNumber || ticket.ticketNumber || ''
+    ticket.queueNumber ||
+      ticket.ticketNumber ||
+      ''
   );
 
   return {
     ...ticket,
-    id: ticket.appointmentId || ticket.id || normalizedQueueNumber || '',
-    appointmentId: ticket.appointmentId || ticket.id || '',
+    id:
+      ticket.appointmentId ||
+      ticket.id ||
+      normalizedQueueNumber ||
+      '',
+    appointmentId:
+      ticket.appointmentId ||
+      ticket.id ||
+      '',
     queueNumber: normalizedQueueNumber,
     status: ticket.status || 'waiting',
     queuePosition: Number(ticket.queuePosition || 0)
@@ -131,8 +438,27 @@ function SWDSQueueMonitor() {
   const [publicQueueError, setPublicQueueError] =
     useState('');
 
+  const [currentDateTime, setCurrentDateTime] = useState(
+    () => getManilaDateTime()
+  );
+
+  // Keep the monitor synchronized with Philippine time.
+  // This only refreshes the display; it does not approve appointments.
   useEffect(() => {
-    // Existing appointments listener.
+    const updateTime = () => {
+      setCurrentDateTime(getManilaDateTime());
+    };
+
+    updateTime();
+
+    const interval = setInterval(updateTime, 5000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    // Listen to SWDS appointments.
+    // This listener is strictly read-only.
     const appointmentsRef = query(
       collection(db, 'appointments'),
       where('office', '==', 'SWDS')
@@ -173,9 +499,7 @@ function SWDSQueueMonitor() {
       }
     );
 
-    // NEW: Listen directly to the public SWDS queue.
-    // This is the same document updated by the staff
-    // when accepting, serving, or completing tickets.
+    // Listen to the authoritative public SWDS queue.
     const publicQueueRef = doc(
       db,
       'queues',
@@ -222,27 +546,37 @@ function SWDSQueueMonitor() {
   const queueError =
     appointmentsError || publicQueueError;
 
-  // Read the public tickets written by the staff dashboard.
-  const hasPublicTicketsArray = Array.isArray(publicQueue?.tickets);
-  const publicTickets = hasPublicTicketsArray
+  // Only use public tickets belonging to the current queue hour.
+  const hasPublicTicketsArray = Array.isArray(
+    publicQueue?.tickets
+  );
+
+  const publicQueueIsCurrentHour =
+    publicQueue?.queueDate === currentDateTime.date &&
+    Number(publicQueue?.queueHour) === currentDateTime.hour;
+
+  const publicTickets = hasPublicTicketsArray &&
+    publicQueueIsCurrentHour
     ? publicQueue.tickets
         .map(normalizePublicTicket)
         .filter(Boolean)
     : [];
 
-  // Match a public ticket to its appointment so that
-  // the admin can also see student and service details.
+  // Match a public ticket to its appointment.
   const findAppointmentForTicket = (ticket) => {
     if (!ticket) return null;
 
-    const ticketQueueNum = normalizeQueueNumber(ticket.queueNumber);
+    const ticketQueueNum = normalizeQueueNumber(
+      ticket.queueNumber
+    );
 
     return (
       queueAppointments.find(
         (appointment) =>
           (ticket.appointmentId &&
             appointment.id === ticket.appointmentId) ||
-          (ticket.id && appointment.id === ticket.id)
+          (ticket.id &&
+            appointment.id === ticket.id)
       ) ||
       queueAppointments.find(
         (appointment) =>
@@ -261,29 +595,34 @@ function SWDSQueueMonitor() {
     return {
       ...(appointment || {}),
       ...ticket,
+
       userName:
         ticket.userName ||
         ticket.studentName ||
         appointment?.userName ||
         appointment?.studentName ||
         '',
+
       service:
         ticket.service ||
         ticket.serviceName ||
         appointment?.service ||
         appointment?.serviceName ||
         '',
+
       reason:
         ticket.reason ||
         ticket.visitReason ||
         appointment?.reason ||
         appointment?.visitReason ||
         '',
+
       queueNumber: normalizeQueueNumber(
         ticket.queueNumber ||
           appointment?.queueNumber ||
           ''
       ),
+
       isPriority:
         typeof ticket.isPriority === 'boolean'
           ? ticket.isPriority
@@ -291,71 +630,108 @@ function SWDSQueueMonitor() {
     };
   };
 
-  // Find appointments whose status is "in-progress".
-  const servingAppointments = queueAppointments
-    .filter(
-      (appointment) =>
-        isServing(appointment.status) &&
+  // Only appointments with current-hour queue assignments
+  // and schedules that have already arrived can be displayed.
+  const eligibleCurrentHourAppointments =
+    queueAppointments.filter((appointment) => {
+      return (
+        belongsToSWDS(appointment) &&
+        isTicketForCurrentHour(
+          appointment,
+          currentDateTime
+        ) &&
+        !isAheadOfTimeAppointment(
+          appointment,
+          currentDateTime
+        ) &&
         normalizeQueueNumber(appointment.queueNumber) !== ''
-    )
-    .sort((a, b) => {
-      const aTime = getTimestamp(
-        a.servingAt || a.startedAt || a.updatedAt
       );
-
-      const bTime = getTimestamp(
-        b.servingAt || b.startedAt || b.updatedAt
-      );
-
-      return bTime - aTime;
     });
 
-  // Read the authoritative nowServing value from queues/SWDS.
-  const publicNowServing = normalizeQueueNumber(
-    publicQueue?.nowServing || ''
-  );
+  // Find appointments whose status is currently serving.
+  const servingAppointments =
+    eligibleCurrentHourAppointments
+      .filter(
+        (appointment) =>
+          isServing(appointment.status)
+      )
+      .sort((a, b) => {
+        const aTime = getTimestamp(
+          a.servingAt ||
+            a.startedAt ||
+            a.updatedAt
+        );
 
-  // Find the corresponding appointment or public ticket.
+        const bTime = getTimestamp(
+          b.servingAt ||
+            b.startedAt ||
+            b.updatedAt
+        );
+
+        return bTime - aTime;
+      });
+
+  // Read the authoritative nowServing value from queues/SWDS.
+  const publicNowServing =
+    publicQueueIsCurrentHour
+      ? normalizeQueueNumber(
+          publicQueue?.nowServing || ''
+        )
+      : '';
+
+  // Find the corresponding public ticket.
   const publicServingTicket = publicNowServing
     ? publicTickets.find(
         (ticket) =>
           normalizeQueueNumber(ticket.queueNumber) ===
-          publicNowServing
+          publicNowServing &&
+          !isInactiveTicket(ticket.status)
       )
     : null;
 
+  // Find the corresponding appointment.
   const publicServingAppointment = publicNowServing
-    ? queueAppointments.find(
+    ? eligibleCurrentHourAppointments.find(
         (appointment) =>
           normalizeQueueNumber(appointment.queueNumber) ===
-          publicNowServing
+            publicNowServing &&
+          isServing(appointment.status)
       )
     : null;
 
-  // Prefer the public queue when available.
+  // Prefer the authoritative public queue.
   // Fall back to appointment status for compatibility.
   const currentServing = publicNowServing
     ? {
         ...(publicServingAppointment || {}),
         ...(publicServingTicket || {}),
+
         userName:
           publicServingTicket?.userName ||
           publicServingTicket?.studentName ||
           publicServingAppointment?.userName ||
           publicServingAppointment?.studentName ||
           '',
+
         service:
           publicServingTicket?.service ||
           publicServingTicket?.serviceName ||
           publicServingAppointment?.service ||
           publicServingAppointment?.serviceName ||
           '',
+
         reason:
           publicServingTicket?.reason ||
           publicServingTicket?.visitReason ||
           publicServingAppointment?.reason ||
           publicServingAppointment?.visitReason ||
           '',
+
+        isPriority:
+          typeof publicServingTicket?.isPriority === 'boolean'
+            ? publicServingTicket.isPriority
+            : Boolean(publicServingAppointment?.isPriority),
+
         queueNumber: publicNowServing
       }
     : servingAppointments[0] || null;
@@ -364,81 +740,106 @@ function SWDSQueueMonitor() {
     currentServing?.queueNumber || ''
   );
 
-  // Approved appointments with assigned queue numbers.
-  const appointmentWaiting = queueAppointments
-    .filter(
-      (appointment) =>
-        isWaiting(appointment.status) &&
-        normalizeQueueNumber(appointment.queueNumber) !== '' &&
-        !isServing(appointment.status)
-    )
-    .map((appointment) => ({
-      ...appointment,
-      queueNumber: normalizeQueueNumber(appointment.queueNumber)
-    }))
-    .sort(compareQueueNumbers);
+  // Approved appointments with current-hour queue numbers.
+  // Pending appointments are intentionally excluded.
+  // This monitor never approves or modifies appointments.
+  const appointmentWaiting =
+    eligibleCurrentHourAppointments
+      .filter(
+        (appointment) =>
+          isWaiting(appointment.status) &&
+          !isServing(appointment.status) &&
+          !isInactiveTicket(appointment.status)
+      )
+      .map((appointment) => ({
+        ...appointment,
+        queueNumber: normalizeQueueNumber(
+          appointment.queueNumber
+        )
+      }))
+      .sort(compareQueueNumbers);
 
   // Public tickets which are waiting to be served.
   const publicWaiting = publicTickets
     .filter((ticket) => {
-      const ticketQueueNum = normalizeQueueNumber(ticket.queueNumber);
-      const normalizedTicketStatus = normalizeStatus(ticket.status);
-      const isExplicitlyNonWaiting = [
-        'completed',
-        'complete',
-        'done',
-        'cancelled',
-        'canceled',
-        'rejected',
-        'declined',
-        'noshow',
-        'served',
-        'serving',
-        'nowserving',
-        'inservice',
-        'inprogress'
-      ].includes(normalizedTicketStatus);
+      const ticketQueueNum = normalizeQueueNumber(
+        ticket.queueNumber
+      );
 
       return (
         ticketQueueNum !== '' &&
         ticketQueueNum !== currentServingQueueNumber &&
-        !isExplicitlyNonWaiting &&
-        (!ticket.status || isWaiting(ticket.status))
+        isWaiting(ticket.status) &&
+        !isInactiveTicket(ticket.status)
       );
     })
-    .map(enrichTicket);
+    .map(enrichTicket)
+    .filter((ticket) => {
+      // Match the same schedule rules as Later/Future.
+      // Future appointments cannot appear in the active queue.
+      const appointment = findAppointmentForTicket(ticket);
 
-  // Use public queue tickets as the authoritative waiting queue when
-  // queues/SWDS is actively publishing tickets; otherwise fall back to
-  // waiting appointments so legacy/fallback setups still work.
+      if (!appointment) {
+        return true;
+      }
+
+      return (
+        isTicketForCurrentHour(
+          appointment,
+          currentDateTime
+        ) &&
+        !isAheadOfTimeAppointment(
+          appointment,
+          currentDateTime
+        )
+      );
+    });
+
+  // Use the public queue as the authoritative waiting queue
+  // whenever the current-hour public queue is available.
   const shouldUsePublicWaitingOnly =
     Boolean(publicQueue) &&
-    (hasPublicTicketsArray || Boolean(publicNowServing));
+    publicQueueIsCurrentHour &&
+    hasPublicTicketsArray;
 
   const waitingMap = new Map();
 
+  // Fallback to appointment records only when the public
+  // queue does not currently publish its tickets array.
   if (!shouldUsePublicWaitingOnly) {
     appointmentWaiting.forEach((appointment) => {
-      if (appointment.queueNumber !== currentServingQueueNumber) {
-        waitingMap.set(appointment.queueNumber, appointment);
+      if (
+        appointment.queueNumber !==
+        currentServingQueueNumber
+      ) {
+        waitingMap.set(
+          appointment.queueNumber,
+          appointment
+        );
       }
     });
   }
 
+  // Merge public tickets with appointment details.
   publicWaiting.forEach((ticket) => {
-    const previous = waitingMap.get(ticket.queueNumber);
+    const previous = waitingMap.get(
+      ticket.queueNumber
+    );
 
     waitingMap.set(ticket.queueNumber, {
       ...(previous || {}),
       ...ticket,
+
       userName:
         ticket.userName ||
         previous?.userName ||
         '',
+
       service:
         ticket.service ||
         previous?.service ||
         '',
+
       reason:
         ticket.reason ||
         previous?.reason ||
@@ -446,7 +847,7 @@ function SWDSQueueMonitor() {
     });
   });
 
-  // Priority appointments are served before normal ones.
+  // Priority appointments are displayed before normal appointments.
   // Queue position determines order within each group.
   const waitingAppointments = Array.from(
     waitingMap.values()
@@ -733,11 +1134,51 @@ function SWDSQueueMonitor() {
 export default function Dashboard() {
   const [chartTimeframe, setChartTimeframe] = useState('WEEK');
 
+  // Actual registered users count from Firestore.
+  const [registeredUsersCount, setRegisteredUsersCount] = useState(0);
+
+  const [registeredUsersLoading, setRegisteredUsersLoading] =
+    useState(true);
+
+  const [registeredUsersError, setRegisteredUsersError] =
+    useState('');
+
   const {
     appointments,
     loading,
     todayDateStr
   } = useDashboardData();
+
+  // Listen to ALL documents in the Firestore users collection.
+  // Automatically updates whenever users are added or removed.
+  useEffect(() => {
+    const usersRef = collection(db, 'users');
+
+    const unsubscribeUsers = onSnapshot(
+      usersRef,
+      (snapshot) => {
+        setRegisteredUsersCount(snapshot.size);
+        setRegisteredUsersError('');
+        setRegisteredUsersLoading(false);
+      },
+      (error) => {
+        console.error(
+          'Registered Users Count Error:',
+          error
+        );
+
+        setRegisteredUsersError(
+          error?.message || 'Unable to load registered users.'
+        );
+
+        setRegisteredUsersLoading(false);
+      }
+    );
+
+    return () => {
+      unsubscribeUsers();
+    };
+  }, []);
 
   const metrics = calculateDashboardMetrics(
     appointments,
@@ -789,16 +1230,30 @@ export default function Dashboard() {
         {/* Existing Dashboard Header */}
         <DashboardHeader />
 
-        {/* Existing Metric Cards */}
+        {/* Updated Metric Cards - Actual Firestore Users Count */}
         <MetricCards
           bookedTodayCount={metrics.bookedTodayCount}
-          registeredUsersCount={REGISTERED_USERS.length}
+          registeredUsersCount={
+            registeredUsersLoading
+              ? 0
+              : registeredUsersCount
+          }
           completionRate={metrics.completionRate}
           completedCount={metrics.completedCount}
           totalBookings={metrics.totalBookings}
         />
 
-        {/* UPDATED: Real-Time SWDS Queue Monitor */}
+        {/* Registered Users Count Error */}
+        {registeredUsersError && (
+          <div
+            role="alert"
+            className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs font-medium text-rose-700"
+          >
+            Unable to load registered users count: {registeredUsersError}
+          </div>
+        )}
+
+        {/* Read-Only Real-Time SWDS Queue Monitor */}
         <SWDSQueueMonitor />
 
         {/* Existing Booking Trends Chart */}
@@ -834,9 +1289,8 @@ export default function Dashboard() {
             CIRCUMFERENCE={metrics.CIRCUMFERENCE}
           />
 
-          <RegisteredUsersList
-            registeredUsers={REGISTERED_USERS}
-          />
+          {/* Updated: Fetches actual users directly from Firestore */}
+          <RegisteredUsersList />
         </div>
       </div>
     </>
