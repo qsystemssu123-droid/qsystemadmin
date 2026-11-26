@@ -11,8 +11,9 @@ import Announcement from './pages/announcement';
 import PerformanceReport from './pages/performanceReport';
 import Login from './pages/login';
 
-// NEW: Public feedback page
+// Public feedback and app download pages
 import PublicFeedback from './pages/publicFeedback.jsx';
+import AppDownload from './pages/appDownload.jsx';
 
 import Sidebar from './components/shared/Sidebar.jsx';
 import Header from './components/shared/Header.jsx';
@@ -39,9 +40,9 @@ export default function App() {
     adminInitials
   } = useAppLogic();
 
-  // Public feedback route.
-  // This page is accessible without admin/staff login.
-  // It does not display the admin sidebar or header.
+  // Public route detection.
+  // These pages are accessible without admin/staff login.
+  // They do not display the admin sidebar or header.
   const currentPath =
     typeof window !== 'undefined'
       ? window.location.pathname.replace(/\/+$/, '') || '/'
@@ -50,10 +51,17 @@ export default function App() {
   const isPublicFeedbackPage =
     currentPath === '/public-feedback';
 
-  // Public route is checked BEFORE authentication loading,
+  const isAppDownloadPage =
+    currentPath === '/download';
+
+  // Public pages are checked BEFORE authentication loading,
   // login redirects, and admin dashboard rendering.
   if (isPublicFeedbackPage) {
     return <PublicFeedback />;
+  }
+
+  if (isAppDownloadPage) {
+    return <AppDownload />;
   }
 
   // Authentication loading screen
