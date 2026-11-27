@@ -2,8 +2,12 @@ import { useEffect, useState, useRef } from "react";
 import emailjs from "@emailjs/browser";
 
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
+  query,
+  where,
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
@@ -12,7 +16,13 @@ import { auth, db } from "../../../services/firebase";
 
 const OFFICE_NAME = "SWDS";
 const PUBLIC_QUEUE_COLLECTION = "queues";
+const SERVICE_TASKS_COLLECTION = "appointment_services";
 const PHILIPPINE_TIME_ZONE = "Asia/Manila";
+
+// Set to true ONLY after the scheduled Cloud Function is deployed
+// and confirmed to be automatically approving appointments correctly.
+// Keep false until then to preserve client-side auto-approval.
+const CLOUD_AUTO_APPROVAL_ENABLED = true;
 
 const COUNSELING_SERVICES = [
   "Guidance & Counseling Services",
@@ -22,14 +32,31 @@ const COUNSELING_SERVICES = [
 const EMAILJS_SERVICE_ID = "service_20wm2tz";
 const EMAILJS_TEMPLATE_ID = "template_f57ki9i";
 const EMAILJS_PUBLIC_KEY = "P8vS1-WoC60N-hGPD";
-
-const FEEDBACK_LINK =
-  "https://qsystem-admin.netlify.app/public-feedback";
+const FEEDBACK_LINK = "https://qsystem-admin.netlify.app/public-feedback";
 
 const normalizeServiceName = (value) =>
   typeof value === "string"
     ? value.trim().replace(/\s+/g, " ").toLowerCase()
     : "";
+
+const getServiceTaskIds = (appointment) => {
+  const ids = [
+    ...(Array.isArray(appointment?.serviceTaskIds)
+      ? appointment.serviceTaskIds
+      : []),
+    ...(Array.isArray(appointment?.services)
+      ? appointment.services.map((service) => service?.serviceTaskId)
+      : []),
+  ];
+
+  return [
+    ...new Set(
+      ids
+        .filter((id) => typeof id === "string" && id.trim())
+        .map((id) => id.trim())
+    ),
+  ];
+};
 
 /*
  * STAFF ASSIGNMENT CHECKS
@@ -38,9 +65,6 @@ const normalizeServiceName = (value) =>
  * 1. Its appointment-level staff assignment matches the logged-in staff; OR
  * 2. It has service-level assignments and EVERY service belongs to
  *    the logged-in staff member.
- *
- * This prevents a staff member from seeing a parent appointment
- * containing services assigned to another staff member.
  */
 
 const normalizeStaffValue = (value) =>
@@ -48,16 +72,11 @@ const normalizeStaffValue = (value) =>
 
 const getStaffAssignmentValues = (item) => {
   if (!item || typeof item !== "object") {
-    return {
-      ids: [],
-      emails: [],
-      hasAssignment: false,
-    };
+    return { ids: [], emails: [], hasAssignment: false };
   }
 
   const assignedStaff =
-    item.assignedStaff &&
-    typeof item.assignedStaff === "object"
+    item.assignedStaff && typeof item.assignedStaff === "object"
       ? item.assignedStaff
       : {};
 
@@ -73,11 +92,9 @@ const getStaffAssignmentValues = (item) => {
     item.assignedToUserId,
     item.staffUid,
     item.assignedStaffUid,
-
     assignedStaff.uid,
     assignedStaff.id,
     assignedStaff.userId,
-
     staff.uid,
     staff.id,
     staff.userId,
@@ -89,7 +106,6 @@ const getStaffAssignmentValues = (item) => {
     item.assignedStaffEmail,
     item.staffEmail,
     item.assignedToEmail,
-
     assignedStaff.email,
     staff.email,
   ]
@@ -99,25 +115,17 @@ const getStaffAssignmentValues = (item) => {
   const assignedTo = normalizeStaffValue(item.assignedTo);
 
   if (assignedTo) {
-    if (assignedTo.includes("@")) {
-      emails.push(assignedTo);
-    } else {
-      ids.push(assignedTo);
-    }
+    if (assignedTo.includes("@")) emails.push(assignedTo);
+    else ids.push(assignedTo);
   }
 
   const assignedStaffValue = normalizeStaffValue(
-    typeof item.assignedStaff === "string"
-      ? item.assignedStaff
-      : ""
+    typeof item.assignedStaff === "string" ? item.assignedStaff : ""
   );
 
   if (assignedStaffValue) {
-    if (assignedStaffValue.includes("@")) {
-      emails.push(assignedStaffValue);
-    } else {
-      ids.push(assignedStaffValue);
-    }
+    if (assignedStaffValue.includes("@")) emails.push(assignedStaffValue);
+    else ids.push(assignedStaffValue);
   }
 
   const staffValue = normalizeStaffValue(
@@ -125,74 +133,47 @@ const getStaffAssignmentValues = (item) => {
   );
 
   if (staffValue) {
-    if (staffValue.includes("@")) {
-      emails.push(staffValue);
-    } else {
-      ids.push(staffValue);
-    }
+    if (staffValue.includes("@")) emails.push(staffValue);
+    else ids.push(staffValue);
   }
 
   return {
     ids: [...new Set(ids)],
     emails: [...new Set(emails)],
-    hasAssignment:
-      ids.length > 0 || emails.length > 0,
+    hasAssignment: ids.length > 0 || emails.length > 0,
   };
 };
 
 const isAssignmentForStaff = (item, staff) => {
-  if (!item || !staff) {
-    return false;
-  }
+  if (!item || !staff) return false;
 
   const staffUid = normalizeStaffValue(staff.uid);
   const staffEmail = normalizeStaffValue(staff.email);
 
-  if (!staffUid && !staffEmail) {
-    return false;
-  }
+  if (!staffUid && !staffEmail) return false;
 
   const assignment = getStaffAssignmentValues(item);
 
-  if (!assignment.hasAssignment) {
-    return false;
-  }
+  if (!assignment.hasAssignment) return false;
 
-  const matchesUid =
-    staffUid && assignment.ids.includes(staffUid);
-
-  const matchesEmail =
-    staffEmail && assignment.emails.includes(staffEmail);
-
-  return Boolean(matchesUid || matchesEmail);
+  return Boolean(
+    (staffUid && assignment.ids.includes(staffUid)) ||
+    (staffEmail && assignment.emails.includes(staffEmail))
+  );
 };
 
 const isAssignedToCurrentStaff = (item, staff) => {
-  if (!item || !staff) {
-    return false;
-  }
+  if (!item || !staff) return false;
 
   const parentAssignment = getStaffAssignmentValues(item);
 
-  /*
-   * If the parent appointment has an explicit assignment,
-   * that assignment is authoritative.
-   */
   if (parentAssignment.hasAssignment) {
     return isAssignmentForStaff(item, staff);
   }
 
-  /*
-   * If there is no parent-level assignment, allow the appointment
-   * only when every service is assigned to this staff member.
-   */
-  const services = Array.isArray(item.services)
-    ? item.services
-    : [];
+  const services = Array.isArray(item.services) ? item.services : [];
 
-  if (!services.length) {
-    return false;
-  }
+  if (!services.length) return false;
 
   return services.every(
     (service) =>
@@ -204,9 +185,7 @@ const isAssignedToCurrentStaff = (item, staff) => {
 
 const assertStaffOwnsAppointment = (item, staff) => {
   if (!staff) {
-    throw new Error(
-      "Your session has expired. Please log in again."
-    );
+    throw new Error("Your session has expired. Please log in again.");
   }
 
   if (!isAssignedToCurrentStaff(item, staff)) {
@@ -218,21 +197,14 @@ const assertStaffOwnsAppointment = (item, staff) => {
 
 const belongsToOffice = (item, officeName = OFFICE_NAME) => {
   const appointmentOffice = String(
-    item?.office ||
-      item?.officeName ||
-      item?.department ||
-      ""
+    item?.office || item?.officeName || item?.department || ""
   )
     .trim()
     .toLowerCase();
 
-  const requestedOffice = String(officeName || "")
-    .trim()
-    .toLowerCase();
+  const requestedOffice = String(officeName || "").trim().toLowerCase();
 
-  if (!appointmentOffice || !requestedOffice) {
-    return false;
-  }
+  if (!appointmentOffice || !requestedOffice) return false;
 
   return (
     appointmentOffice === requestedOffice ||
@@ -280,9 +252,7 @@ const getManilaDateKey = (date = new Date()) => {
 };
 
 const getManilaHour = (date) => {
-  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
-    return null;
-  }
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
 
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: PHILIPPINE_TIME_ZONE,
@@ -290,18 +260,13 @@ const getManilaHour = (date) => {
     hourCycle: "h23",
   }).formatToParts(date);
 
-  const hour = Number(
-    parts.find((part) => part.type === "hour")?.value
-  );
+  const hour = Number(parts.find((part) => part.type === "hour")?.value);
 
   return Number.isInteger(hour) ? hour : null;
 };
 
 const getScheduledDate = (item) => {
-  const value =
-    item?.rescheduledToDate ||
-    item?.appointmentDate ||
-    "";
+  const value = item?.rescheduledToDate || item?.appointmentDate || "";
 
   if (!value) return "";
 
@@ -317,18 +282,14 @@ const getScheduledDate = (item) => {
         ? value
         : null;
 
-  return date && !Number.isNaN(date.getTime())
-    ? getManilaDateKey(date)
-    : "";
+  return date && !Number.isNaN(date.getTime()) ? getManilaDateKey(date) : "";
 };
 
 const getScheduledTime = (item) =>
   item?.rescheduledToTime || item?.appointmentTime || "";
 
 const convertTimeToMinutes = (time) => {
-  if (typeof time !== "string" || !time.trim()) {
-    return null;
-  }
+  if (typeof time !== "string" || !time.trim()) return null;
 
   const normalized = time.trim().toUpperCase();
 
@@ -341,19 +302,14 @@ const convertTimeToMinutes = (time) => {
     const minutes = Number(twelveHourMatch[2]);
     const period = twelveHourMatch[3];
 
-    if (
-      hours < 1 ||
-      hours > 12 ||
-      minutes < 0 ||
-      minutes > 59
-    ) {
+    if (hours < 1 || hours > 12 || minutes < 0 || minutes > 59) {
       return null;
     }
 
     if (period === "AM") {
       if (hours === 12) hours = 0;
-    } else {
-      if (hours !== 12) hours += 12;
+    } else if (hours !== 12) {
+      hours += 12;
     }
 
     return hours * 60 + minutes;
@@ -367,12 +323,7 @@ const convertTimeToMinutes = (time) => {
     const hours = Number(twentyFourHourMatch[1]);
     const minutes = Number(twentyFourHourMatch[2]);
 
-    if (
-      hours < 0 ||
-      hours > 23 ||
-      minutes < 0 ||
-      minutes > 59
-    ) {
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
       return null;
     }
 
@@ -393,33 +344,19 @@ const hasValidAppointmentSchedule = (item) => {
 };
 
 const isAheadOfTimeAppointment = (item, currentDateTime) => {
-  if (!hasValidAppointmentSchedule(item)) {
-    return false;
-  }
+  if (!hasValidAppointmentSchedule(item)) return false;
 
   const scheduledDate = getScheduledDate(item);
-  const scheduledMinutes = convertTimeToMinutes(
-    getScheduledTime(item)
-  );
+  const scheduledMinutes = convertTimeToMinutes(getScheduledTime(item));
 
-  if (scheduledDate > currentDateTime.date) {
-    return true;
-  }
-
-  if (scheduledDate < currentDateTime.date) {
-    return false;
-  }
+  if (scheduledDate > currentDateTime.date) return true;
+  if (scheduledDate < currentDateTime.date) return false;
 
   return scheduledMinutes > currentDateTime.minutes;
 };
 
-const isAppointmentReadyForAutomaticApproval = (
-  item,
-  currentDateTime
-) => {
-  if (!hasValidAppointmentSchedule(item)) {
-    return false;
-  }
+const isAppointmentReadyForAutomaticApproval = (item, currentDateTime) => {
+  if (!hasValidAppointmentSchedule(item)) return false;
 
   return !isAheadOfTimeAppointment(item, currentDateTime);
 };
@@ -430,11 +367,7 @@ const getAppointmentServices = (item) => {
   const addService = (value) => {
     if (typeof value === "string") {
       const normalized = value.trim();
-
-      if (normalized) {
-        services.push(normalized);
-      }
-
+      if (normalized) services.push(normalized);
       return;
     }
 
@@ -446,38 +379,21 @@ const getAppointmentServices = (item) => {
         value.service ||
         value.title;
 
-      if (
-        typeof serviceName === "string" &&
-        serviceName.trim()
-      ) {
+      if (typeof serviceName === "string" && serviceName.trim()) {
         services.push(serviceName.trim());
       }
     }
   };
 
-  if (Array.isArray(item?.services)) {
-    item.services.forEach(addService);
-  }
+  if (Array.isArray(item?.services)) item.services.forEach(addService);
+  if (Array.isArray(item?.selectedServices)) item.selectedServices.forEach(addService);
+  if (Array.isArray(item?.serviceNames)) item.serviceNames.forEach(addService);
 
-  if (Array.isArray(item?.selectedServices)) {
-    item.selectedServices.forEach(addService);
-  }
-
-  if (Array.isArray(item?.serviceNames)) {
-    item.serviceNames.forEach(addService);
-  }
-
-  if (
-    typeof item?.service === "string" &&
-    item.service.trim()
-  ) {
+  if (typeof item?.service === "string" && item.service.trim()) {
     item.service.split(",").forEach(addService);
   }
 
-  if (
-    typeof item?.serviceName === "string" &&
-    item.serviceName.trim()
-  ) {
+  if (typeof item?.serviceName === "string" && item.serviceName.trim()) {
     addService(item.serviceName);
   }
 
@@ -486,42 +402,24 @@ const getAppointmentServices = (item) => {
 
 const getServiceLabel = (item) => {
   const services = getAppointmentServices(item);
-
-  return services.length
-    ? services.join(", ")
-    : item?.reason || "Appointment";
+  return services.length ? services.join(", ") : item?.reason || "Appointment";
 };
 
 const requiresCounselingConfirmation = (item) => {
-  const selectedServices = getAppointmentServices(item).map(
-    normalizeServiceName
-  );
+  const selectedServices = getAppointmentServices(item).map(normalizeServiceName);
+  const counselingNames = COUNSELING_SERVICES.map(normalizeServiceName);
 
-  const counselingNames = COUNSELING_SERVICES.map(
-    normalizeServiceName
-  );
-
-  return selectedServices.some((service) =>
-    counselingNames.includes(service)
-  );
+  return selectedServices.some((service) => counselingNames.includes(service));
 };
 
-const assertAutomaticApprovalAllowed = (
-  appointmentData,
-  currentDateTime
-) => {
+const assertAutomaticApprovalAllowed = (appointmentData, currentDateTime) => {
   if (requiresCounselingConfirmation(appointmentData)) {
     throw new Error(
       "This appointment includes Guidance and Counseling Services. It must remain pending until staff explicitly accepts it."
     );
   }
 
-  if (
-    !isAppointmentReadyForAutomaticApproval(
-      appointmentData,
-      currentDateTime
-    )
-  ) {
+  if (!isAppointmentReadyForAutomaticApproval(appointmentData, currentDateTime)) {
     throw new Error(
       "This appointment is scheduled for a later time and cannot be automatically approved yet."
     );
@@ -529,13 +427,8 @@ const assertAutomaticApprovalAllowed = (
 };
 
 const isWalkInAppointment = (item) => {
-  if (!item || typeof item !== "object") {
-    return false;
-  }
-
-  if (item.isWalkIn === true) {
-    return true;
-  }
+  if (!item || typeof item !== "object") return false;
+  if (item.isWalkIn === true) return true;
 
   const possibleTypes = [
     item.source,
@@ -558,13 +451,8 @@ const isWalkInAppointment = (item) => {
     );
   });
 
-  if (hasWalkInType) {
-    return true;
-  }
-
-  if (item.registeredBy || item.registeredByEmail) {
-    return true;
-  }
+  if (hasWalkInType) return true;
+  if (item.registeredBy || item.registeredByEmail) return true;
 
   return false;
 };
@@ -578,9 +466,7 @@ const getAppointmentEmail = (item) => {
   ];
 
   const email = possibleEmails.find(
-    (value) =>
-      typeof value === "string" &&
-      value.trim().length > 0
+    (value) => typeof value === "string" && value.trim().length > 0
   );
 
   return email ? email.trim() : "";
@@ -599,17 +485,14 @@ const getFeedbackReference = (item) => {
   ];
 
   const reference = possibleReferences.find(
-    (value) =>
-      typeof value === "string" &&
-      value.trim().length > 0
+    (value) => typeof value === "string" && value.trim().length > 0
   );
 
   return reference ? reference.trim() : "";
 };
 
 const isValidFeedbackReference = (reference) =>
-  typeof reference === "string" &&
-  /^[a-f0-9]{48}$/i.test(reference.trim());
+  typeof reference === "string" && /^[a-f0-9]{48}$/i.test(reference.trim());
 
 const buildPersonalizedFeedbackLink = (item) => {
   const reference = getFeedbackReference(item);
@@ -649,19 +532,14 @@ const getEmailJSErrorMessage = (error) => {
       .join(" ");
   }
 
-  if (message) {
-    return message;
-  }
+  if (message) return message;
 
   return "Unknown EmailJS error. Check your EmailJS service and template configuration.";
 };
 
 const sendWalkInCompletionEmail = async (item, officeName) => {
   if (!isWalkInAppointment(item)) {
-    return {
-      sent: false,
-      reason: "Not a walk-in appointment.",
-    };
+    return { sent: false, reason: "Not a walk-in appointment." };
   }
 
   const recipientEmail = getAppointmentEmail(item);
@@ -673,8 +551,7 @@ const sendWalkInCompletionEmail = async (item, officeName) => {
     );
   }
 
-  const personalizedFeedbackLink =
-    buildPersonalizedFeedbackLink(item);
+  const personalizedFeedbackLink = buildPersonalizedFeedbackLink(item);
 
   const templateParams = {
     to_email: recipientEmail,
@@ -697,8 +574,7 @@ const sendWalkInCompletionEmail = async (item, officeName) => {
     if (response?.status && response.status !== 200) {
       throw new Error(
         `EmailJS returned status ${response.status}: ${
-          response.text ||
-          "Email delivery request was unsuccessful."
+          response.text || "Email delivery request was unsuccessful."
         }`
       );
     }
@@ -717,9 +593,7 @@ const sendWalkInCompletionEmail = async (item, officeName) => {
       message: error?.message || null,
     });
 
-    throw new Error(getEmailJSErrorMessage(error), {
-      cause: error,
-    });
+    throw new Error(getEmailJSErrorMessage(error), { cause: error });
   }
 };
 
@@ -741,9 +615,7 @@ const getAppointmentQueueDate = (item) => {
             ? new Date(approvedAt)
             : null;
 
-  return date && !Number.isNaN(date.getTime())
-    ? getManilaDateKey(date)
-    : null;
+  return date && !Number.isNaN(date.getTime()) ? getManilaDateKey(date) : null;
 };
 
 const getAppointmentQueueHour = (item) => {
@@ -754,9 +626,7 @@ const getAppointmentQueueHour = (item) => {
   ) {
     const hour = Number(item.queueHour);
 
-    if (Number.isInteger(hour) && hour >= 0 && hour <= 23) {
-      return hour;
-    }
+    if (Number.isInteger(hour) && hour >= 0 && hour <= 23) return hour;
   }
 
   const possibleTimestamps = [
@@ -773,16 +643,13 @@ const getAppointmentQueueHour = (item) => {
           ? new Date(value.seconds * 1000)
           : value instanceof Date
             ? value
-            : typeof value === "string" ||
-                typeof value === "number"
+            : typeof value === "string" || typeof value === "number"
               ? new Date(value)
               : null;
 
     const hour = getManilaHour(date);
 
-    if (hour !== null) {
-      return hour;
-    }
+    if (hour !== null) return hour;
   }
 
   return null;
@@ -812,9 +679,7 @@ const readTickets = (data) =>
   Array.isArray(data?.tickets) ? data.tickets : [];
 
 const withoutTicket = (tickets, appointmentId) =>
-  tickets.filter(
-    (ticket) => ticket.appointmentId !== appointmentId
-  );
+  tickets.filter((ticket) => ticket.appointmentId !== appointmentId);
 
 const getStatus = (item) =>
   String(item?.status || "pending")
@@ -822,47 +687,278 @@ const getStatus = (item) =>
     .toLowerCase()
     .replace(/\s+/g, " ");
 
-const isPending = (item) =>
-  ["pending", "waiting"].includes(getStatus(item));
+const isPending = (item) => ["pending", "waiting"].includes(getStatus(item));
 
 const isApproved = (item) =>
-  [
-    "approved",
-    "confirmed",
-    "approved - waiting",
-  ].includes(getStatus(item));
+  ["approved", "confirmed", "approved - waiting"].includes(getStatus(item));
 
 const isServing = (item) =>
-  ["in-progress", "serving", "now-serving"].includes(
-    getStatus(item)
-  );
+  ["in-progress", "serving", "now-serving"].includes(getStatus(item));
 
 const getQueueNumber = (item) => {
   if (isPending(item)) return "Pending";
 
-  return item?.queueNumber
-    ? String(item.queueNumber)
-    : "Not Assigned";
+  return item?.queueNumber ? String(item.queueNumber) : "Not Assigned";
 };
 
 const getTimestamp = (item) => {
   const value = item?.approvedAt || item?.createdAt;
 
-  if (typeof value?.toMillis === "function") {
-    return value.toMillis();
-  }
-
-  if (typeof value?.seconds === "number") {
-    return value.seconds * 1000;
-  }
-
+  if (typeof value?.toMillis === "function") return value.toMillis();
+  if (typeof value?.seconds === "number") return value.seconds * 1000;
   if (typeof value === "number") return value;
-
-  if (typeof value === "string") {
-    return Date.parse(value) || 0;
-  }
+  if (typeof value === "string") return Date.parse(value) || 0;
 
   return 0;
+};
+
+/*
+ * FETCH CHILD SERVICE REFERENCES BEFORE THE TRANSACTION.
+ *
+ * Firestore Web SDK Transaction.get() accepts DocumentReference,
+ * not Query. Therefore, queries must be executed with getDocs()
+ * before the transaction starts.
+ */
+const getLinkedServiceTaskQueryRefs = async (appointmentId) => {
+  if (typeof appointmentId !== "string" || !appointmentId.trim()) {
+    throw new Error("Invalid appointment ID.");
+  }
+
+  const tasksCollection = collection(db, SERVICE_TASKS_COLLECTION);
+
+  const appointmentTasksQuery = query(
+    tasksCollection,
+    where("appointmentId", "==", appointmentId)
+  );
+
+  const parentAppointmentTasksQuery = query(
+    tasksCollection,
+    where("parentAppointmentId", "==", appointmentId)
+  );
+
+  const [
+    appointmentTaskQuerySnapshot,
+    parentTaskQuerySnapshot,
+  ] = await Promise.all([
+    getDocs(appointmentTasksQuery),
+    getDocs(parentAppointmentTasksQuery),
+  ]);
+
+  const taskRefs = new Map();
+
+  [appointmentTaskQuerySnapshot, parentTaskQuerySnapshot].forEach(
+    (querySnapshot) => {
+      querySnapshot.forEach((snapshot) => {
+        if (snapshot?.ref?.path) {
+          taskRefs.set(snapshot.id, snapshot.ref);
+        }
+      });
+    }
+  );
+
+  return [...taskRefs.values()];
+};
+
+/*
+ * FINDS EVERY CHILD SERVICE DOCUMENT CONNECTED TO THIS APPOINTMENT.
+ *
+ * It checks:
+ * 1. IDs saved in appointments.serviceTaskIds.
+ * 2. IDs saved in appointments.services[].serviceTaskId.
+ * 3. Documents matching appointmentId.
+ * 4. Documents matching parentAppointmentId.
+ *
+ * All transaction.get() calls receive valid DocumentReferences.
+ */
+const getLinkedServiceTaskSnapshots = async (
+  transaction,
+  appointmentData,
+  appointmentId,
+  staff,
+  queriedTaskRefs = [],
+  allowedStatuses = ["pending", "waiting", "approved", "confirmed"]
+) => {
+  const taskRefs = new Map();
+
+  getServiceTaskIds(appointmentData).forEach((taskId) => {
+    if (typeof taskId !== "string" || !taskId.trim()) return;
+
+    const ref = doc(db, SERVICE_TASKS_COLLECTION, taskId.trim());
+
+    if (ref?.path) {
+      taskRefs.set(taskId.trim(), ref);
+    }
+  });
+
+  queriedTaskRefs.forEach((ref) => {
+    if (
+      ref &&
+      typeof ref.path === "string" &&
+      ref.path.startsWith(`${SERVICE_TASKS_COLLECTION}/`) &&
+      ref.id
+    ) {
+      taskRefs.set(ref.id, ref);
+    }
+  });
+
+  if (!taskRefs.size) {
+    throw new Error(
+      `No linked service documents were found in "${SERVICE_TASKS_COLLECTION}" for appointment "${appointmentId}". The appointment was not updated.`
+    );
+  }
+
+  const directTaskSnapshots = await Promise.all(
+    [...taskRefs.entries()].map(async ([id, ref]) => {
+      if (!ref || typeof ref.path !== "string") {
+        throw new Error(
+          `Invalid Firestore reference for service task "${id}".`
+        );
+      }
+
+      return {
+        id,
+        ref,
+        snapshot: await transaction.get(ref),
+      };
+    })
+  );
+
+  const linkedTasks = new Map();
+
+  directTaskSnapshots.forEach(({ id, ref, snapshot }) => {
+    if (!snapshot.exists()) {
+      throw new Error(
+        `The linked service task "${id}" could not be found in "${SERVICE_TASKS_COLLECTION}".`
+      );
+    }
+
+    linkedTasks.set(id, {
+      id,
+      ref,
+      data: snapshot.data(),
+    });
+  });
+
+  const serviceTasks = [];
+
+  linkedTasks.forEach(({ id, ref, data }) => {
+    const linkedAppointmentId =
+      data.parentAppointmentId || data.appointmentId;
+
+    if (linkedAppointmentId !== appointmentId) {
+      throw new Error(
+        `Service task "${id}" does not belong to appointment "${appointmentId}".`
+      );
+    }
+
+    if (!belongsToOffice(data, OFFICE_NAME)) {
+      throw new Error(`Service task "${id}" does not belong to SWDS.`);
+    }
+
+    if (!isAssignmentForStaff(data, staff)) {
+      throw new Error(
+        `You are not authorized to manage service task "${id}" because it is not assigned to your account.`
+      );
+    }
+
+    const taskStatus = getStatus(data);
+
+    if (!allowedStatuses.includes(taskStatus)) {
+      throw new Error(
+        `Service task "${id}" cannot be updated because its current status is "${taskStatus}".`
+      );
+    }
+
+    serviceTasks.push({ id, ref, data });
+  });
+
+  return serviceTasks;
+};
+
+/*
+ * BUILDS THE PARENT APPOINTMENT SYNCHRONIZATION DATA.
+ *
+ * IMPORTANT:
+ * Firestore serverTimestamp() sentinels are NOT supported inside arrays.
+ * Embedded service objects are stored inside the parent's services array.
+ * Convert timestamp fields to regular Date values for those embedded objects.
+ *
+ * Top-level document fields continue using serverTimestamp().
+ */
+const buildParentServiceSyncData = (
+  appointmentData,
+  serviceTasks,
+  updates
+) => {
+  const existingServices = Array.isArray(appointmentData?.services)
+    ? appointmentData.services
+    : [];
+
+  const embeddedUpdates = { ...updates };
+
+  Object.keys(embeddedUpdates).forEach((key) => {
+    if (/At$/.test(key) && embeddedUpdates[key] != null) {
+      embeddedUpdates[key] = new Date();
+    }
+  });
+
+  const synchronizedServices = existingServices.map((service) => {
+    if (!service || typeof service !== "object" || Array.isArray(service)) {
+      return service;
+    }
+
+    return {
+      ...service,
+      ...embeddedUpdates,
+    };
+  });
+
+  const taskCount = serviceTasks.length;
+  const pendingCount =
+    updates.status === "pending" || updates.status === "waiting"
+      ? taskCount
+      : 0;
+
+  const completedCount =
+    updates.status === "completed" ? taskCount : 0;
+
+  return {
+    services: synchronizedServices,
+    pendingServices: pendingCount,
+    completedServices: completedCount,
+  };
+};
+
+/*
+ * UPDATES EVERY LINKED CHILD TASK AND THE PARENT'S EMBEDDED SERVICES.
+ *
+ * Call this only after all linked task documents have been read inside
+ * the active transaction.
+ *
+ * Parent and child document timestamp fields remain serverTimestamp().
+ * Only timestamp values inside the embedded services array use Date.
+ */
+const synchronizeServiceTaskWrites = (
+  transaction,
+  appointmentRef,
+  appointmentData,
+  serviceTasks,
+  updates
+) => {
+  const parentSyncData = buildParentServiceSyncData(
+    appointmentData,
+    serviceTasks,
+    updates
+  );
+
+  transaction.update(appointmentRef, {
+    ...updates,
+    ...parentSyncData,
+  });
+
+  serviceTasks.forEach(({ ref }) => {
+    transaction.update(ref, updates);
+  });
 };
 
 export default function useSWDS({
@@ -871,10 +967,7 @@ export default function useSWDS({
 }) {
   const officeName = OFFICE_NAME;
 
-  const [todayKey, setTodayKey] = useState(() =>
-    getManilaDateKey()
-  );
-
+  const [todayKey, setTodayKey] = useState(() => getManilaDateKey());
   const [currentDateTime, setCurrentDateTime] = useState(
     () => getManilaDateTime()
   );
@@ -883,7 +976,6 @@ export default function useSWDS({
   const appointmentsRef = useRef(appointments);
 
   const currentStaff = auth.currentUser;
-
   const currentStaffUid = currentStaff?.uid || "";
   const currentStaffEmail = currentStaff?.email || "";
 
@@ -899,17 +991,12 @@ export default function useSWDS({
 
     updatePhilippineTime();
 
-    const interval = setInterval(
-      updatePhilippineTime,
-      5000
-    );
+    const interval = setInterval(updatePhilippineTime, 5000);
 
     return () => clearInterval(interval);
   }, []);
 
-  const [appointmentToReject, setAppointmentToReject] =
-    useState(null);
-
+  const [appointmentToReject, setAppointmentToReject] = useState(null);
   const [rejectionReason, setRejectionReason] = useState("");
   const [isRejecting, setIsRejecting] = useState(false);
   const [rejectionError, setRejectionError] = useState("");
@@ -921,31 +1008,25 @@ export default function useSWDS({
   const currentQueueHour = currentDateTime.hour;
 
   /*
-   * First filter by office.
-   * Then filter by the currently authenticated staff member.
-   *
-   * Appointments without a matching staff assignment are hidden.
+   * FIRST FILTER BY OFFICE.
+   * THEN FILTER BY THE CURRENTLY AUTHENTICATED STAFF MEMBER.
    */
-  const allOfficeAppointments = (appointments || []).filter(
-    (item) => belongsToOffice(item, officeName)
+  const allOfficeAppointments = (appointments || []).filter((item) =>
+    belongsToOffice(item, officeName)
   );
 
-  const officeAppointments = allOfficeAppointments.filter(
-    (item) =>
-      isAssignedToCurrentStaff(item, {
-        uid: currentStaffUid,
-        email: currentStaffEmail,
-      })
+  const officeAppointments = allOfficeAppointments.filter((item) =>
+    isAssignedToCurrentStaff(item, {
+      uid: currentStaffUid,
+      email: currentStaffEmail,
+    })
   );
 
   const validAppointments = officeAppointments.filter(
     (item) =>
-      ![
-        "completed",
-        "rejected",
-        "cancelled",
-        "canceled",
-      ].includes(getStatus(item))
+      !["completed", "rejected", "cancelled", "canceled"].includes(
+        getStatus(item)
+      )
   );
 
   const completedCount = officeAppointments.filter(
@@ -966,29 +1047,22 @@ export default function useSWDS({
     (item) => item.isPriority
   );
 
-  const normalPendingAppointments =
-    pendingAppointments.filter((item) => !item.isPriority);
+  const normalPendingAppointments = pendingAppointments.filter(
+    (item) => !item.isPriority
+  );
 
-  const automaticApprovalAppointments =
-    allPendingAppointments.filter(
-      (item) =>
-        !requiresCounselingConfirmation(item) &&
-        isAppointmentReadyForAutomaticApproval(
-          item,
-          currentDateTime
-        )
-    );
+  const automaticApprovalAppointments = allPendingAppointments.filter(
+    (item) =>
+      !requiresCounselingConfirmation(item) &&
+      isAppointmentReadyForAutomaticApproval(item, currentDateTime)
+  );
 
   const approvedPriority = validAppointments
     .filter(
       (item) =>
         item.isPriority &&
         isApproved(item) &&
-        isTicketForCurrentHour(
-          item,
-          todayKey,
-          currentQueueHour
-        ) &&
+        isTicketForCurrentHour(item, todayKey, currentQueueHour) &&
         item.queueNumber &&
         !isAheadOfTimeAppointment(item, currentDateTime)
     )
@@ -999,11 +1073,7 @@ export default function useSWDS({
       (item) =>
         !item.isPriority &&
         isApproved(item) &&
-        isTicketForCurrentHour(
-          item,
-          todayKey,
-          currentQueueHour
-        ) &&
+        isTicketForCurrentHour(item, todayKey, currentQueueHour) &&
         item.queueNumber &&
         !isAheadOfTimeAppointment(item, currentDateTime)
     )
@@ -1013,75 +1083,42 @@ export default function useSWDS({
     validAppointments.find(
       (item) =>
         isServing(item) &&
-        isTicketForCurrentHour(
-          item,
-          todayKey,
-          currentQueueHour
-        ) &&
+        isTicketForCurrentHour(item, todayKey, currentQueueHour) &&
         !isAheadOfTimeAppointment(item, currentDateTime)
     ) || null;
 
-  /*
-   * Check the office-wide serving state without exposing another
-   * staff member's appointment in this hook's returned data.
-   */
-  const officeHasCurrentlyServingAppointment =
-    allOfficeAppointments.some(
-      (item) =>
-        isServing(item) &&
-        isTicketForCurrentHour(
-          item,
-          todayKey,
-          currentQueueHour
-        ) &&
-        !isAheadOfTimeAppointment(item, currentDateTime)
-    );
-
-  const upcomingQueue = [
-    ...approvedPriority,
-    ...normalAppointments,
-  ];
-
-  const laterDisplayAppointments = validAppointments.map(
-    (item) => {
-      const isFuture = isAheadOfTimeAppointment(
-        item,
-        currentDateTime
-      );
-
-      if (isFuture && isApproved(item)) {
-        return {
-          ...item,
-          status: "approved - waiting",
-        };
-      }
-
-      return item;
-    }
+  const officeHasCurrentlyServingAppointment = allOfficeAppointments.some(
+    (item) =>
+      isServing(item) &&
+      isTicketForCurrentHour(item, todayKey, currentQueueHour) &&
+      !isAheadOfTimeAppointment(item, currentDateTime)
   );
+
+  const upcomingQueue = [...approvedPriority, ...normalAppointments];
+
+  const laterDisplayAppointments = validAppointments.map((item) => {
+    const isFuture = isAheadOfTimeAppointment(item, currentDateTime);
+
+    if (isFuture && isApproved(item)) {
+      return { ...item, status: "approved - waiting" };
+    }
+
+    return item;
+  });
 
   const clearMessages = () => {
     setActionError("");
     setActionSuccess("");
   };
 
-  const handleAcceptAppointment = async (
-    item,
-    options = {}
-  ) => {
+  const handleAcceptAppointment = async (item, options = {}) => {
     if (processingId) return;
 
     const isAutomatic = options.automatic === true;
     const staff = auth.currentUser;
 
     if (!staff) {
-      if (isAutomatic) {
-        autoApprovalAttempted.current.delete(item.id);
-      }
-
-      setActionError(
-        "Your session has expired. Please log in again."
-      );
+      setActionError("Your session has expired. Please log in again.");
       return;
     }
 
@@ -1096,18 +1133,11 @@ export default function useSWDS({
     clearMessages();
 
     try {
-      const appointmentRef = doc(
-        db,
-        "appointments",
-        item.id
-      );
+      const queriedServiceTaskRefs =
+        await getLinkedServiceTaskQueryRefs(item.id);
 
-      const counterRef = doc(
-        db,
-        "queue-counters",
-        officeName
-      );
-
+      const appointmentRef = doc(db, "appointments", item.id);
+      const counterRef = doc(db, "queue-counters", officeName);
       const publicQueueRef = doc(
         db,
         PUBLIC_QUEUE_COLLECTION,
@@ -1117,46 +1147,29 @@ export default function useSWDS({
       const assignedNumber = await runTransaction(
         db,
         async (transaction) => {
-          const appointmentSnapshot =
-            await transaction.get(appointmentRef);
-
-          const counterSnapshot =
-            await transaction.get(counterRef);
-
-          const publicSnapshot =
-            await transaction.get(publicQueueRef);
+          const appointmentSnapshot = await transaction.get(appointmentRef);
+          const counterSnapshot = await transaction.get(counterRef);
+          const publicSnapshot = await transaction.get(publicQueueRef);
 
           if (!appointmentSnapshot.exists()) {
-            throw new Error(
-              "The appointment could not be found."
-            );
+            throw new Error("The appointment could not be found.");
           }
 
-          const appointmentData =
-            appointmentSnapshot.data();
+          const appointmentData = appointmentSnapshot.data();
 
           if (!belongsToOffice(appointmentData, officeName)) {
-            throw new Error(
-              "This appointment does not belong to SWDS."
-            );
+            throw new Error("This appointment does not belong to SWDS.");
           }
 
-          assertStaffOwnsAppointment(
-            appointmentData,
-            staff
-          );
+          assertStaffOwnsAppointment(appointmentData, staff);
 
-          const currentStatus = String(
-            appointmentData.status || "pending"
-          )
+          const currentStatus = String(appointmentData.status || "pending")
             .trim()
             .toLowerCase()
             .replace(/\s+/g, " ");
 
           if (!["pending", "waiting"].includes(currentStatus)) {
-            throw new Error(
-              "Only pending appointments can be accepted."
-            );
+            throw new Error("Only pending appointments can be accepted.");
           }
 
           const approvalDateTime = getManilaDateTime();
@@ -1167,6 +1180,16 @@ export default function useSWDS({
               approvalDateTime
             );
           }
+
+          const serviceTaskSnapshots =
+            await getLinkedServiceTaskSnapshots(
+              transaction,
+              appointmentData,
+              item.id,
+              staff,
+              queriedServiceTaskRefs,
+              ["pending", "waiting", "approved", "confirmed"]
+            );
 
           const dateKey = approvalDateTime.date;
           const hourKey = approvalDateTime.hour;
@@ -1181,10 +1204,6 @@ export default function useSWDS({
               ? Number(counterData.lastNumber || 0)
               : 0;
 
-          /*
-           * Keep queue numbering office-wide so staff members
-           * cannot generate duplicate queue numbers.
-           */
           const highestCurrentHour = Math.max(
             0,
             ...appointmentsRef.current
@@ -1192,11 +1211,7 @@ export default function useSWDS({
                 (appointment) =>
                   appointment.id !== item.id &&
                   belongsToOffice(appointment, officeName) &&
-                  isTicketForCurrentHour(
-                    appointment,
-                    dateKey,
-                    hourKey
-                  )
+                  isTicketForCurrentHour(appointment, dateKey, hourKey)
               )
               .map((appointment) => {
                 const match = String(
@@ -1208,14 +1223,9 @@ export default function useSWDS({
           );
 
           const nextNumber =
-            Math.max(
-              sameHourCounter,
-              highestCurrentHour
-            ) + 1;
+            Math.max(sameHourCounter, highestCurrentHour) + 1;
 
-          const queueNumber = `SWDS-${String(
-            nextNumber
-          ).padStart(3, "0")}`;
+          const queueNumber = `SWDS-${String(nextNumber).padStart(3, "0")}`;
 
           transaction.set(
             counterRef,
@@ -1247,11 +1257,9 @@ export default function useSWDS({
               office: officeName,
               queueDate: dateKey,
               queueHour: hourKey,
-
               nowServing: sameHourPublicQueue
                 ? publicData.nowServing || ""
                 : "",
-
               tickets: [
                 ...withoutTicket(tickets, item.id),
                 publicTicket(
@@ -1266,13 +1274,18 @@ export default function useSWDS({
                   queueNumber
                 ),
               ],
-
               updatedAt: serverTimestamp(),
             },
             { merge: true }
           );
 
-          transaction.update(appointmentRef, {
+          /*
+           * SYNCHRONIZE PARENT + EMBEDDED SERVICES + CHILD TASKS.
+           *
+           * Embedded services receive Date values for timestamp fields.
+           * Top-level parent and child fields retain serverTimestamp().
+           */
+          const approvalUpdates = {
             status: "approved",
             queueNumber,
             queuePosition: nextNumber,
@@ -1281,7 +1294,16 @@ export default function useSWDS({
             approvedAt: serverTimestamp(),
             approvedBy: staff.uid,
             approvedByEmail: staff.email || "",
-          });
+            updatedAt: serverTimestamp(),
+          };
+
+          synchronizeServiceTaskWrites(
+            transaction,
+            appointmentRef,
+            appointmentData,
+            serviceTaskSnapshots,
+            approvalUpdates
+          );
 
           return queueNumber;
         }
@@ -1293,31 +1315,33 @@ export default function useSWDS({
     } catch (error) {
       console.error("Failed to accept appointment:", error);
 
-      if (isAutomatic) {
-        autoApprovalAttempted.current.delete(item.id);
-      }
-
-      setActionError(
-        error?.message || "Failed to accept appointment."
-      );
+      /*
+       * Do not remove failed automatic attempts from the Set.
+       * Otherwise, the useEffect immediately retries the same failed
+       * transaction whenever the appointments or hook state changes.
+       * This prevents repeated failures and staff UI blinking.
+       */
+      setActionError(error?.message || "Failed to accept appointment.");
     } finally {
       setProcessingId(null);
     }
   };
 
   useEffect(() => {
-    if (processingId) return;
+    // Cloud Function handles auto-approval when this switch is enabled.
+    // This prevents the client from issuing duplicate approvals.
+    if (CLOUD_AUTO_APPROVAL_ENABLED) return;
 
+    if (processingId) return;
     if (!currentStaffUid) return;
 
-    const nextAppointment =
-      automaticApprovalAppointments.find(
-        (item) =>
-          !autoApprovalAttempted.current.has(item.id)
-      );
+    const nextAppointment = automaticApprovalAppointments.find(
+      (item) => !autoApprovalAttempted.current.has(item.id)
+    );
 
     if (!nextAppointment) return;
 
+    // Mark before starting the async transaction to prevent duplicate calls.
     autoApprovalAttempted.current.add(nextAppointment.id);
 
     handleAcceptAppointment(nextAppointment, {
@@ -1345,9 +1369,7 @@ export default function useSWDS({
     const staff = auth.currentUser;
 
     if (!staff) {
-      setActionError(
-        "Your session has expired. Please log in again."
-      );
+      setActionError("Your session has expired. Please log in again.");
       return;
     }
 
@@ -1362,141 +1384,132 @@ export default function useSWDS({
     clearMessages();
 
     try {
-      const appointmentRef = doc(
-        db,
-        "appointments",
-        item.id
-      );
+      const queriedServiceTaskRefs =
+        await getLinkedServiceTaskQueryRefs(item.id);
 
+      const appointmentRef = doc(db, "appointments", item.id);
       const publicQueueRef = doc(
         db,
         PUBLIC_QUEUE_COLLECTION,
         officeName
       );
 
-      await runTransaction(
-        db,
-        async (transaction) => {
-          const snapshot =
-            await transaction.get(appointmentRef);
+      await runTransaction(db, async (transaction) => {
+        const snapshot = await transaction.get(appointmentRef);
+        const publicSnapshot = await transaction.get(publicQueueRef);
 
-          const publicSnapshot =
-            await transaction.get(publicQueueRef);
+        if (!snapshot.exists()) {
+          throw new Error("Appointment not found.");
+        }
 
-          if (!snapshot.exists()) {
-            throw new Error("Appointment not found.");
-          }
+        const data = snapshot.data();
 
-          const data = snapshot.data();
+        if (!belongsToOffice(data, officeName)) {
+          throw new Error("This appointment does not belong to SWDS.");
+        }
 
-          if (!belongsToOffice(data, officeName)) {
-            throw new Error(
-              "This appointment does not belong to SWDS."
-            );
-          }
+        assertStaffOwnsAppointment(data, staff);
 
-          assertStaffOwnsAppointment(data, staff);
+        if (getStatus(data) !== "approved") {
+          throw new Error(
+            "Only approved appointments or registered walk-ins can be served."
+          );
+        }
 
-          if (getStatus(data) !== "approved") {
-            throw new Error(
-              "Only approved appointments or registered walk-ins can be served."
-            );
-          }
-
-          const dateTime = getManilaDateTime();
-          const dateKey = dateTime.date;
-          const hourKey = dateTime.hour;
-
-          if (!isTicketForDay(data, dateKey)) {
-            throw new Error(
-              "This ticket belongs to a previous day and cannot be served today."
-            );
-          }
-
-          if (
-            !isTicketForCurrentHour(
-              data,
-              dateKey,
-              hourKey
-            )
-          ) {
-            throw new Error(
-              "This ticket belongs to a previous hour's queue and cannot be served in the current hourly queue."
-            );
-          }
-
-          if (isAheadOfTimeAppointment(data, dateTime)) {
-            throw new Error(
-              "This appointment is scheduled for a later time and cannot be served yet."
-            );
-          }
-
-          if (!data.queueNumber) {
-            throw new Error(
-              "This appointment has no assigned queue number."
-            );
-          }
-
-          const publicData =
-            publicSnapshot.data() || {};
-
-          const sameHourPublicQueue =
-            publicData.queueDate === dateKey &&
-            Number(publicData.queueHour) === hourKey;
-
-          if (
-            sameHourPublicQueue &&
-            publicData.nowServing &&
-            publicData.nowServing !== data.queueNumber
-          ) {
-            throw new Error(
-              "Another ticket is currently being served."
-            );
-          }
-
-          const tickets = sameHourPublicQueue
-            ? readTickets(publicData)
-            : [];
-
-          transaction.set(
-            publicQueueRef,
-            {
-              office: officeName,
-              queueDate: dateKey,
-              queueHour: hourKey,
-              nowServing: data.queueNumber,
-
-              tickets: [
-                ...withoutTicket(tickets, item.id),
-                publicTicket(
-                  { ...data, id: item.id },
-                  "in-progress"
-                ),
-              ],
-
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
+        const serviceTaskSnapshots =
+          await getLinkedServiceTaskSnapshots(
+            transaction,
+            data,
+            item.id,
+            staff,
+            queriedServiceTaskRefs,
+            ["approved", "confirmed"]
           );
 
-          transaction.update(appointmentRef, {
-            status: "in-progress",
-            servingAt: serverTimestamp(),
-            servingBy: staff.uid,
-            servingByEmail: staff.email || "",
-          });
-        }
-      );
+        const dateTime = getManilaDateTime();
+        const dateKey = dateTime.date;
+        const hourKey = dateTime.hour;
 
-      setActionSuccess(
-        `Now serving ${item.queueNumber}.`
-      );
+        if (!isTicketForDay(data, dateKey)) {
+          throw new Error(
+            "This ticket belongs to a previous day and cannot be served today."
+          );
+        }
+
+        if (!isTicketForCurrentHour(data, dateKey, hourKey)) {
+          throw new Error(
+            "This ticket belongs to a previous hour's queue and cannot be served in the current hourly queue."
+          );
+        }
+
+        if (isAheadOfTimeAppointment(data, dateTime)) {
+          throw new Error(
+            "This appointment is scheduled for a later time and cannot be served yet."
+          );
+        }
+
+        if (!data.queueNumber) {
+          throw new Error("This appointment has no assigned queue number.");
+        }
+
+        const publicData = publicSnapshot.data() || {};
+
+        const sameHourPublicQueue =
+          publicData.queueDate === dateKey &&
+          Number(publicData.queueHour) === hourKey;
+
+        if (
+          sameHourPublicQueue &&
+          publicData.nowServing &&
+          publicData.nowServing !== data.queueNumber
+        ) {
+          throw new Error("Another ticket is currently being served.");
+        }
+
+        const tickets = sameHourPublicQueue
+          ? readTickets(publicData)
+          : [];
+
+        transaction.set(
+          publicQueueRef,
+          {
+            office: officeName,
+            queueDate: dateKey,
+            queueHour: hourKey,
+            nowServing: data.queueNumber,
+            tickets: [
+              ...withoutTicket(tickets, item.id),
+              publicTicket({ ...data, id: item.id }, "in-progress"),
+            ],
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        /*
+         * SYNCHRONIZE PARENT + EMBEDDED SERVICES + CHILD TASKS.
+         */
+        const servingUpdates = {
+          status: "in-progress",
+          servingAt: serverTimestamp(),
+          servingBy: staff.uid,
+          servingByEmail: staff.email || "",
+          updatedAt: serverTimestamp(),
+        };
+
+        synchronizeServiceTaskWrites(
+          transaction,
+          appointmentRef,
+          data,
+          serviceTaskSnapshots,
+          servingUpdates
+        );
+      });
+
+      setActionSuccess(`Now serving ${item.queueNumber}.`);
     } catch (error) {
       console.error("Failed to start serving:", error);
-
-      setActionError(
-        error?.message || "Failed to start serving."
-      );
+      setActionError(error?.message || "Failed to start serving.");
     } finally {
       setProcessingId(null);
     }
@@ -1508,9 +1521,7 @@ export default function useSWDS({
     const staff = auth.currentUser;
 
     if (!staff) {
-      setActionError(
-        "Your session has expired. Please log in again."
-      );
+      setActionError("Your session has expired. Please log in again.");
       return;
     }
 
@@ -1526,46 +1537,85 @@ export default function useSWDS({
 
     try {
       if (typeof completeAppointment !== "function") {
-        throw new Error(
-          "The completion handler is unavailable."
-        );
+        throw new Error("The completion handler is unavailable.");
       }
 
-      /*
-       * Recheck the latest Firestore assignment before calling
-       * the existing completion handler.
-       */
-      const appointmentRef = doc(
-        db,
-        "appointments",
-        item.id
-      );
-
-      const appointmentSnapshot = await getDoc(
-        appointmentRef
-      );
+      const appointmentRef = doc(db, "appointments", item.id);
+      const appointmentSnapshot = await getDoc(appointmentRef);
 
       if (!appointmentSnapshot.exists()) {
-        throw new Error(
-          "The appointment could not be found."
-        );
+        throw new Error("The appointment could not be found.");
       }
 
-      const latestAppointmentData =
-        appointmentSnapshot.data();
+      const latestAppointmentData = appointmentSnapshot.data();
 
       if (!belongsToOffice(latestAppointmentData, officeName)) {
-        throw new Error(
-          "This appointment does not belong to SWDS."
-        );
+        throw new Error("This appointment does not belong to SWDS.");
       }
 
-      assertStaffOwnsAppointment(
-        latestAppointmentData,
-        staff
-      );
+      assertStaffOwnsAppointment(latestAppointmentData, staff);
 
+      /*
+       * Fetch linked service references before completing the parent.
+       * The actual child documents are read again inside the transaction.
+       */
+      const queriedServiceTaskRefs =
+        await getLinkedServiceTaskQueryRefs(item.id);
+
+      /*
+       * Preserve the existing completion handler.
+       */
       await completeAppointment(item.id);
+
+      /*
+       * Synchronize the parent and every linked child service task.
+       */
+      await runTransaction(db, async (transaction) => {
+        const latestSnapshot = await transaction.get(appointmentRef);
+
+        if (!latestSnapshot.exists()) {
+          throw new Error("The appointment could not be found.");
+        }
+
+        const latestData = latestSnapshot.data();
+
+        if (!belongsToOffice(latestData, officeName)) {
+          throw new Error("This appointment does not belong to SWDS.");
+        }
+
+        assertStaffOwnsAppointment(latestData, staff);
+
+        const serviceTaskSnapshots =
+          await getLinkedServiceTaskSnapshots(
+            transaction,
+            latestData,
+            item.id,
+            staff,
+            queriedServiceTaskRefs,
+            [
+              "in-progress",
+              "serving",
+              "now-serving",
+              "completed",
+            ]
+          );
+
+        const completionUpdates = {
+          status: "completed",
+          completedAt: serverTimestamp(),
+          completedBy: staff.uid,
+          completedByEmail: staff.email || "",
+          updatedAt: serverTimestamp(),
+        };
+
+        synchronizeServiceTaskWrites(
+          transaction,
+          appointmentRef,
+          latestData,
+          serviceTaskSnapshots,
+          completionUpdates
+        );
+      });
 
       const publicQueueRef = doc(
         db,
@@ -1573,72 +1623,53 @@ export default function useSWDS({
         officeName
       );
 
-      await runTransaction(
-        db,
-        async (transaction) => {
-          const publicSnapshot =
-            await transaction.get(publicQueueRef);
+      await runTransaction(db, async (transaction) => {
+        const publicSnapshot = await transaction.get(publicQueueRef);
+        const publicData = publicSnapshot.data() || {};
+        const currentDateTime = getManilaDateTime();
 
-          const publicData =
-            publicSnapshot.data() || {};
+        const sameHour =
+          publicData.queueDate === currentDateTime.date &&
+          Number(publicData.queueHour) === currentDateTime.hour;
 
-          const currentDateTime = getManilaDateTime();
+        const existingTickets = readTickets(publicData);
 
-          const sameHour =
-            publicData.queueDate === currentDateTime.date &&
-            Number(publicData.queueHour) ===
-              currentDateTime.hour;
+        const matchingServingTicket = existingTickets.some(
+          (ticket) =>
+            ticket.appointmentId === item.id &&
+            ticket.queueNumber === publicData.nowServing
+        );
 
-          const existingTickets = readTickets(publicData);
-
-          const matchingServingTicket =
-            existingTickets.some(
-              (ticket) =>
-                ticket.appointmentId === item.id &&
-                ticket.queueNumber === publicData.nowServing
-            );
-
-          transaction.set(
-            publicQueueRef,
-            {
-              office: officeName,
-
-              nowServing:
-                sameHour && matchingServingTicket
-                  ? ""
-                  : publicData.nowServing || "",
-
-              tickets: withoutTicket(
-                existingTickets,
-                item.id
-              ),
-
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
-        }
-      );
+        transaction.set(
+          publicQueueRef,
+          {
+            office: officeName,
+            nowServing:
+              sameHour && matchingServingTicket
+                ? ""
+                : publicData.nowServing || "",
+            tickets: withoutTicket(existingTickets, item.id),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      });
 
       let emailMessage = "";
 
       if (isWalkInAppointment(item)) {
         try {
-          const emailResult =
-            await sendWalkInCompletionEmail(
-              item,
-              officeName
-            );
+          const emailResult = await sendWalkInCompletionEmail(
+            item,
+            officeName
+          );
 
           if (emailResult.sent) {
             emailMessage =
               ` A completion email was successfully sent to ${emailResult.email}.`;
           }
         } catch (emailError) {
-          console.error(
-            "Walk-in completion email failed:",
-            emailError
-          );
+          console.error("Walk-in completion email failed:", emailError);
 
           emailMessage =
             ` However, the completion email failed: ${
@@ -1652,10 +1683,7 @@ export default function useSWDS({
       );
     } catch (error) {
       console.error("Failed to complete appointment:", error);
-
-      setActionError(
-        error?.message || "Failed to complete appointment."
-      );
+      setActionError(error?.message || "Failed to complete appointment.");
     } finally {
       setProcessingId(null);
     }
@@ -1708,9 +1736,7 @@ export default function useSWDS({
     const staff = auth.currentUser;
 
     if (!staff) {
-      setRejectionError(
-        "Your session has expired. Please log in again."
-      );
+      setRejectionError("Your session has expired. Please log in again.");
       return;
     }
 
@@ -1726,134 +1752,128 @@ export default function useSWDS({
 
     try {
       const appointmentId = appointmentToReject.id;
-
-      const appointmentRef = doc(
-        db,
-        "appointments",
-        appointmentId
-      );
-
+      const appointmentRef = doc(db, "appointments", appointmentId);
       const rejectedAppointmentRef = doc(
         db,
         "rejected-appointments",
         appointmentId
       );
-
       const publicQueueRef = doc(
         db,
         PUBLIC_QUEUE_COLLECTION,
         officeName
       );
 
-      await runTransaction(
-        db,
-        async (transaction) => {
-          const appointmentSnapshot =
-            await transaction.get(appointmentRef);
+      const queriedServiceTaskRefs =
+        await getLinkedServiceTaskQueryRefs(appointmentId);
 
-          const publicSnapshot =
-            await transaction.get(publicQueueRef);
+      await runTransaction(db, async (transaction) => {
+        const appointmentSnapshot = await transaction.get(appointmentRef);
+        const publicSnapshot = await transaction.get(publicQueueRef);
 
-          if (!appointmentSnapshot.exists()) {
-            throw new Error(
-              "The appointment could not be found."
-            );
-          }
-
-          const appointmentData =
-            appointmentSnapshot.data();
-
-          if (!belongsToOffice(appointmentData, officeName)) {
-            throw new Error(
-              "This appointment does not belong to SWDS."
-            );
-          }
-
-          assertStaffOwnsAppointment(
-            appointmentData,
-            staff
-          );
-
-          const currentStatus = getStatus(appointmentData);
-
-          if (
-            [
-              "rejected",
-              "completed",
-              "cancelled",
-              "canceled",
-            ].includes(currentStatus)
-          ) {
-            throw new Error(
-              "This appointment has already been processed."
-            );
-          }
-
-          const rejectionDetails = {
-            status: "rejected",
-            rejectionReason: reason,
-            rejectedAt: serverTimestamp(),
-            rejectedBy: staff.uid,
-            rejectedByEmail: staff.email || "",
-          };
-
-          transaction.update(
-            appointmentRef,
-            rejectionDetails
-          );
-
-          transaction.set(
-            rejectedAppointmentRef,
-            {
-              ...appointmentData,
-              id: appointmentId,
-              appointmentId,
-              ...rejectionDetails,
-            }
-          );
-
-          const publicData =
-            publicSnapshot.data() || {};
-
-          const publicTickets = readTickets(publicData);
-
-          const matchingServingTicket =
-            publicTickets.some(
-              (ticket) =>
-                ticket.appointmentId === appointmentId &&
-                ticket.queueNumber === publicData.nowServing
-            );
-
-          transaction.set(
-            publicQueueRef,
-            {
-              office: officeName,
-
-              nowServing:
-                publicData.queueDate === getManilaDateKey() &&
-                matchingServingTicket
-                  ? ""
-                  : publicData.nowServing || "",
-
-              tickets: withoutTicket(
-                publicTickets,
-                appointmentId
-              ),
-
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
+        if (!appointmentSnapshot.exists()) {
+          throw new Error("The appointment could not be found.");
         }
-      );
+
+        const appointmentData = appointmentSnapshot.data();
+
+        if (!belongsToOffice(appointmentData, officeName)) {
+          throw new Error("This appointment does not belong to SWDS.");
+        }
+
+        assertStaffOwnsAppointment(appointmentData, staff);
+
+        const currentStatus = getStatus(appointmentData);
+
+        if (
+          ["rejected", "completed", "cancelled", "canceled"].includes(
+            currentStatus
+          )
+        ) {
+          throw new Error("This appointment has already been processed.");
+        }
+
+        const serviceTaskSnapshots =
+          await getLinkedServiceTaskSnapshots(
+            transaction,
+            appointmentData,
+            appointmentId,
+            staff,
+            queriedServiceTaskRefs,
+            [
+              "pending",
+              "waiting",
+              "approved",
+              "confirmed",
+              "in-progress",
+              "serving",
+              "now-serving",
+            ]
+          );
+
+        const rejectionDetails = {
+          status: "rejected",
+          rejectionReason: reason,
+          rejectedAt: serverTimestamp(),
+          rejectedBy: staff.uid,
+          rejectedByEmail: staff.email || "",
+          updatedAt: serverTimestamp(),
+        };
+
+        /*
+         * Synchronize parent, embedded service entries, and child tasks.
+         * Embedded array timestamps are converted to Date values.
+         */
+        synchronizeServiceTaskWrites(
+          transaction,
+          appointmentRef,
+          appointmentData,
+          serviceTaskSnapshots,
+          rejectionDetails
+        );
+
+        transaction.set(rejectedAppointmentRef, {
+          ...appointmentData,
+          id: appointmentId,
+          appointmentId,
+          ...rejectionDetails,
+          ...buildParentServiceSyncData(
+            appointmentData,
+            serviceTaskSnapshots,
+            rejectionDetails
+          ),
+        });
+
+        const publicData = publicSnapshot.data() || {};
+        const publicTickets = readTickets(publicData);
+
+        const matchingServingTicket = publicTickets.some(
+          (ticket) =>
+            ticket.appointmentId === appointmentId &&
+            ticket.queueNumber === publicData.nowServing
+        );
+
+        transaction.set(
+          publicQueueRef,
+          {
+            office: officeName,
+            nowServing:
+              publicData.queueDate === getManilaDateKey() &&
+              matchingServingTicket
+                ? ""
+                : publicData.nowServing || "",
+            tickets: withoutTicket(publicTickets, appointmentId),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      });
 
       setAppointmentToReject(null);
       setRejectionReason("");
       setRejectionError("");
 
-      setActionSuccess(
-        "Appointment rejected successfully."
-      );
+      setActionSuccess("Appointment rejected successfully.");
     } catch (error) {
       console.error("Failed to reject appointment:", error);
 

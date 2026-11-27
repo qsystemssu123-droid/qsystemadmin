@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
@@ -38,13 +37,6 @@ import {
 
 // Automatically assigned office for all new staff accounts
 const DEFAULT_STAFF_OFFICE = 'SWDS';
-
-// Only these three staff members can be assigned to SWDS services
-const ASSIGNABLE_STAFF_EMAILS = [
-  'staff.ssu.glenn@gmail.com',
-  'staff.ssu.chenyl@gmail.com',
-  'staff.ssu.patricia@gmail.com'
-];
 
 // SWDS services
 const SWDS_SERVICES = [
@@ -93,6 +85,9 @@ const SWDS_SERVICES = [
 const ASSIGNMENT_DOC = 'swds_service_assignments';
 const ASSIGNMENT_DOC_ID = 'current';
 
+const normalizeOffice = (office) =>
+  String(office || '').trim().toUpperCase();
+
 export default function Staff() {
   // Form states
   const [name, setName] = useState('');
@@ -112,11 +107,10 @@ export default function Staff() {
   const [loadingAssignments, setLoadingAssignments] = useState(true);
   const [savingAssignments, setSavingAssignments] = useState(false);
 
-  // Get only Glenn, Shenyl, and Patricia
-  const assignableStaff = staffList.filter((staff) =>
-    ASSIGNABLE_STAFF_EMAILS.includes(
-      staff.email?.trim().toLowerCase()
-    )
+  // Dynamically get every registered SWDS staff member.
+  // No specific staff names, emails, or UIDs are hardcoded.
+  const assignableStaff = staffList.filter(
+    (staff) => normalizeOffice(staff.office) === DEFAULT_STAFF_OFFICE
   );
 
   // Reusable fetch logic for manual refreshes
@@ -417,6 +411,27 @@ export default function Staff() {
     setSavingAssignments(true);
 
     try {
+      // Refresh the staff directory before saving to ensure
+      // assignments reference currently registered SWDS staff.
+      const latestStaffList = await getDocs(collection(db, 'staff'));
+
+      const latestAssignableStaff = latestStaffList.docs
+        .map((staffDoc) => ({
+          id: staffDoc.id,
+          ...staffDoc.data()
+        }))
+        .filter(
+          (staff) =>
+            normalizeOffice(staff.office) === DEFAULT_STAFF_OFFICE
+        );
+
+      setStaffList(
+        latestStaffList.docs.map((staffDoc) => ({
+          id: staffDoc.id,
+          ...staffDoc.data()
+        }))
+      );
+
       const updatedAssignments = {};
 
       // Validate each selected staff member before saving
@@ -427,20 +442,20 @@ export default function Staff() {
           continue;
         }
 
-        const selectedStaff = assignableStaff.find(
+        const selectedStaff = latestAssignableStaff.find(
           (staff) => staff.id === assignment.staffId
         );
 
         if (!selectedStaff) {
           throw new Error(
-            `The assigned staff member for "${service.name}" is no longer available. Please select another staff member.`
+            `The assigned staff member for "${service.name}" is no longer available or is not registered under SWDS. Please select another staff member.`
           );
         }
 
         updatedAssignments[service.id] = {
           staffId: selectedStaff.id,
-          staffName: selectedStaff.name,
-          staffEmail: selectedStaff.email
+          staffName: selectedStaff.name || '',
+          staffEmail: selectedStaff.email || ''
         };
       }
 
@@ -560,8 +575,8 @@ export default function Staff() {
             </h2>
 
             <p className="text-sm text-slate-500 mt-1">
-              Assign Glenn, Shenyl, and Patricia to manage the different SWDS services.
-              A staff member can handle multiple services.
+              Assign registered SWDS staff members to manage the different services.
+              A staff member can handle multiple services, and assignments can be changed at any time.
             </p>
           </div>
 
@@ -572,58 +587,65 @@ export default function Staff() {
         </div>
 
         {/* Staff Assignment Summary */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {ASSIGNABLE_STAFF_EMAILS.map((staffEmail) => {
-            const staff = assignableStaff.find(
-              (item) =>
-                item.email?.toLowerCase() === staffEmail
-            );
+        <div>
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <h3 className="text-sm font-bold text-slate-800">
+              SWDS Staff Assignment Summary
+            </h3>
 
-            const assignmentCount = staff
-              ? getStaffAssignmentCount(staff.id)
-              : 0;
+            <span className="text-xs text-slate-400">
+              {assignableStaff.length} Registered SWDS Staff
+            </span>
+          </div>
 
-            const fallbackNames = {
-              'staff.ssu.glenn@gmail.com': 'Glenn',
-              'staff.ssu.shenyl@gmail.com': 'Shenyl',
-              'staff.ssu.patricia@gmail.com': 'Patricia'
-            };
+          {assignableStaff.length === 0 ? (
+            <div className="p-6 rounded-xl border border-dashed border-slate-300 bg-slate-50 text-center">
+              <Users className="w-8 h-8 text-slate-300 mx-auto mb-2" />
 
-            return (
-              <div
-                key={staffEmail}
-                className="p-4 rounded-xl border border-slate-200 bg-slate-50/70"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-9 h-9 rounded-xl bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
-                      <User className="w-4 h-4" />
-                    </div>
+              <p className="text-sm font-semibold text-slate-600">
+                No SWDS staff members found
+              </p>
 
-                    <div className="min-w-0">
-                      <p className="text-sm font-bold text-slate-900 truncate">
-                        {staff?.name || fallbackNames[staffEmail]}
-                      </p>
+              <p className="text-xs text-slate-400 mt-1">
+                Create a staff account and assign it to the SWDS office to make it available here.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {assignableStaff.map((staff) => {
+                const assignmentCount = getStaffAssignmentCount(staff.id);
 
-                      <p className="text-xs text-slate-500 truncate">
-                        {staffEmail}
-                      </p>
+                return (
+                  <div
+                    key={staff.id}
+                    className="p-4 rounded-xl border border-slate-200 bg-slate-50/70"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-9 h-9 rounded-xl bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
+                          <User className="w-4 h-4" />
+                        </div>
+
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-slate-900 truncate">
+                            {staff.name || 'Unnamed Staff'}
+                          </p>
+
+                          <p className="text-xs text-slate-500 truncate">
+                            {staff.email || 'No email available'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <span className="text-xs font-bold text-sky-700 bg-sky-100 px-2.5 py-1 rounded-lg whitespace-nowrap">
+                        {assignmentCount} {assignmentCount === 1 ? 'Service' : 'Services'}
+                      </span>
                     </div>
                   </div>
-
-                  <span className="text-xs font-bold text-sky-700 bg-sky-100 px-2.5 py-1 rounded-lg whitespace-nowrap">
-                    {assignmentCount} {assignmentCount === 1 ? 'Service' : 'Services'}
-                  </span>
-                </div>
-
-                {!staff && (
-                  <p className="text-xs text-amber-600 mt-3">
-                    Staff account not found in the registered directory.
-                  </p>
-                )}
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Service Assignment List */}
@@ -635,7 +657,7 @@ export default function Staff() {
               </h3>
 
               <p className="text-xs text-slate-500 mt-1">
-                Select which staff member is responsible for each service.
+                Select which registered SWDS staff member is responsible for each service.
               </p>
             </div>
 
@@ -705,7 +727,7 @@ export default function Staff() {
                             key={staff.id}
                             value={staff.id}
                           >
-                            {staff.name} ({staff.email})
+                            {staff.name || 'Unnamed Staff'} ({staff.email || 'No email'})
                           </option>
                         ))}
                       </select>

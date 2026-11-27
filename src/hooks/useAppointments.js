@@ -8,22 +8,22 @@ import {
   orderBy,
   onSnapshot,
   getDocs,
+  getDoc,
   limit,
-  writeBatch
+  writeBatch,
+  runTransaction,
+  where,
+  serverTimestamp
 } from 'firebase/firestore';
 import { auth, db } from '../services/firebase.js';
 
 const ADMIN_EMAIL = 'qsystemssu123@gmail.com';
 const DELETE_BATCH_SIZE = 400;
 
-// Optional: Configure this in your .env file for production.
-// Example:
-// VITE_FEEDBACK_SITE_URL=https://your-domain.com
 const FEEDBACK_SITE_URL = (
   import.meta.env.VITE_FEEDBACK_SITE_URL || ''
 ).trim().replace(/\/+$/, '');
 
-// A valid feedback reference is a 48-character hexadecimal token.
 const isValidFeedbackReference = (reference) => {
   return (
     typeof reference === 'string' &&
@@ -31,8 +31,6 @@ const isValidFeedbackReference = (reference) => {
   );
 };
 
-// Generate a personalized feedback link.
-// The student will not need to manually type the reference.
 export const generateFeedbackLink = (feedbackReference) => {
   const reference = String(feedbackReference || '').trim();
 
@@ -52,9 +50,7 @@ export const generateFeedbackLink = (feedbackReference) => {
 
   try {
     const url = new URL('/public-feedback', baseUrl);
-
     url.searchParams.set('token', reference);
-
     return url.toString();
   } catch (error) {
     console.error('Error generating feedback link:', error);
@@ -62,8 +58,6 @@ export const generateFeedbackLink = (feedbackReference) => {
   }
 };
 
-// Copy text to the clipboard.
-// Supports modern browsers and a fallback for older browsers.
 const copyTextToClipboard = async (text) => {
   if (
     typeof navigator !== 'undefined' &&
@@ -114,17 +108,49 @@ const copyTextToClipboard = async (text) => {
   }
 };
 
+const normalize = (value) =>
+  String(value || '').trim().toLowerCase();
+
+const isCompletedStatus = (status) =>
+  ['completed', 'complete', 'finished', 'done'].includes(
+    normalize(status)
+  );
+
+const isActiveStatus = (status) =>
+  [
+    'pending',
+    'booked',
+    'requested',
+    'approved',
+    'waiting',
+    'in-progress',
+    'serving',
+    'now-serving'
+  ].includes(normalize(status));
+
+const getAssignedStaffId = (data) =>
+  String(
+    data?.assignedStaffId ||
+    data?.staffId ||
+    ''
+  ).trim();
+
+const getAssignedStaffEmail = (data) =>
+  normalize(
+    data?.assignedStaffEmail ||
+    data?.staffEmail ||
+    ''
+  );
+
 export function useAppointments() {
   const [appointments, setAppointments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [clearingAppointments, setClearingAppointments] = useState(false);
 
-  // NEW: Feedback link copy state.
   const [copyingFeedbackId, setCopyingFeedbackId] = useState(null);
   const [feedbackCopyError, setFeedbackCopyError] = useState('');
 
   useEffect(() => {
-    // Sort from first (oldest/earliest) to last.
     const q = query(
       collection(db, 'appointments'),
       orderBy('createdAt', 'asc')
@@ -156,10 +182,249 @@ export function useAppointments() {
       await updateDoc(docRef, { status: newStatus });
     } catch (error) {
       console.error('Error updating status: ', error);
+      throw error;
     }
   };
 
-  // NEW: Get a feedback link for a completed appointment.
+  // COMPLETE THE CURRENT STAFF MEMBER'S SERVICE TASK.
+  const completeAppointment = async (id) => {
+    if (!id) {
+      throw new Error('Appointment ID is required.');
+    }
+
+    const currentUser = auth.currentUser;
+
+    if (!currentUser) {
+      throw new Error('Authentication required to complete an appointment.');
+    }
+
+    const appointmentRef = doc(db, 'appointments', id);
+
+    const appointmentSnapshot = await getDoc(appointmentRef);
+
+    if (!appointmentSnapshot.exists()) {
+      throw new Error('Appointment not found.');
+    }
+
+    const tasksQuery = query(
+      collection(db, 'appointment_services'),
+      where('appointmentId', '==', id)
+    );
+
+    const tasksSnapshot = await getDocs(tasksQuery);
+
+    // Legacy appointment without child service documents.
+    if (tasksSnapshot.empty) {
+      await updateDoc(appointmentRef, {
+        status: 'completed'
+      });
+
+      return {
+        success: true,
+        message: 'Appointment completed successfully.'
+      };
+    }
+
+    const tasks = tasksSnapshot.docs.map((task) => ({
+      ref: task.ref,
+      id: task.id,
+      data: task.data()
+    }));
+
+    const currentUid = currentUser.uid;
+    const currentEmail = normalize(currentUser.email);
+
+    // Identify the service assigned to the authenticated staff member.
+    let assignedTasks = tasks.filter(({ data }) => {
+      const staffId = getAssignedStaffId(data);
+      const staffEmail = getAssignedStaffEmail(data);
+
+      return (
+        (staffId && staffId === currentUid) ||
+        (currentEmail && staffEmail === currentEmail)
+      );
+    });
+
+    // Admin can complete a task only when there is exactly one
+    // unfinished task, because this callback receives only appointment ID.
+    if (
+      !assignedTasks.length &&
+      currentEmail === normalize(ADMIN_EMAIL)
+    ) {
+      const unfinishedTasks = tasks.filter(
+        ({ data }) => !isCompletedStatus(data.status)
+      );
+
+      if (unfinishedTasks.length === 1) {
+        assignedTasks = unfinishedTasks;
+      }
+    }
+
+    if (assignedTasks.length !== 1) {
+      throw new Error(
+        assignedTasks.length > 1
+          ? 'Multiple service tasks are assigned to this account. The correct task could not be identified.'
+          : 'No service task assigned to your account was found for this appointment.'
+      );
+    }
+
+    const targetTask = assignedTasks[0];
+
+    // All reads happen before writes inside the transaction.
+    return await runTransaction(db, async (transaction) => {
+      const freshAppointment = await transaction.get(appointmentRef);
+
+      if (!freshAppointment.exists()) {
+        throw new Error('Appointment no longer exists.');
+      }
+
+      const freshTasks = [];
+
+      for (const task of tasks) {
+        const snapshot = await transaction.get(task.ref);
+
+        if (snapshot.exists()) {
+          freshTasks.push({
+            ref: task.ref,
+            id: task.id,
+            data: snapshot.data()
+          });
+        }
+      }
+
+      const freshTarget = freshTasks.find(
+        (task) => task.id === targetTask.id
+      );
+
+      if (!freshTarget) {
+        throw new Error('The assigned service task no longer exists.');
+      }
+
+      const freshAppointmentData = freshAppointment.data();
+
+      // Recheck ownership to avoid completing a reassigned task.
+      const freshStaffId = getAssignedStaffId(freshTarget.data);
+      const freshStaffEmail = getAssignedStaffEmail(freshTarget.data);
+
+      const stillAssigned =
+        (freshStaffId && freshStaffId === currentUid) ||
+        (currentEmail && freshStaffEmail === currentEmail) ||
+        (
+          currentEmail === normalize(ADMIN_EMAIL) &&
+          !freshStaffId &&
+          !freshStaffEmail &&
+          tasks.length === 1
+        );
+
+      if (!stillAssigned) {
+        throw new Error(
+          'This service task is no longer assigned to your account.'
+        );
+      }
+
+      // Mark only the selected staff member's task completed.
+      transaction.update(freshTarget.ref, {
+        status: 'completed',
+        completedAt: serverTimestamp(),
+        completedBy: currentUid,
+        completedByEmail: currentUser.email || ''
+      });
+
+      // Calculate the final status of every child task.
+      const finalTasks = freshTasks.map((task) => ({
+        ...task,
+        data: {
+          ...task.data,
+          status:
+            task.id === freshTarget.id
+              ? 'completed'
+              : task.data.status
+        }
+      }));
+
+      const completedCount = finalTasks.filter(
+        (task) => isCompletedStatus(task.data.status)
+      ).length;
+
+      const pendingCount = finalTasks.filter(
+        (task) => isActiveStatus(task.data.status)
+      ).length;
+
+      const allCompleted =
+        finalTasks.length > 0 &&
+        completedCount === finalTasks.length;
+
+      // Synchronize embedded parent service statuses.
+      const services = Array.isArray(freshAppointmentData.services)
+        ? [...freshAppointmentData.services]
+        : [];
+
+      const serviceTaskIds = Array.isArray(
+        freshAppointmentData.serviceTaskIds
+      )
+        ? freshAppointmentData.serviceTaskIds
+        : [];
+
+      finalTasks.forEach((task) => {
+        let serviceIndex = serviceTaskIds.findIndex(
+          (taskId) => taskId === task.id
+        );
+
+        if (serviceIndex < 0) {
+          serviceIndex = services.findIndex((service) => {
+            const sameStaff =
+              getAssignedStaffId(service) ===
+                getAssignedStaffId(task.data) ||
+              getAssignedStaffEmail(service) ===
+                getAssignedStaffEmail(task.data);
+
+            const sameService =
+              normalize(service.serviceId) ===
+                normalize(task.data.serviceId) ||
+              normalize(service.serviceName) ===
+                normalize(task.data.serviceName) ||
+              normalize(service.name) ===
+                normalize(task.data.serviceName);
+
+            return sameStaff && sameService;
+          });
+        }
+
+        if (serviceIndex >= 0 && services[serviceIndex]) {
+          services[serviceIndex] = {
+            ...services[serviceIndex],
+            status: task.data.status || 'pending'
+          };
+        }
+      });
+
+      // Update parent counters and status.
+      const parentUpdates = {
+        services,
+        completedServices: completedCount,
+        pendingServices: pendingCount,
+        status: allCompleted ? 'completed' : 'approved'
+      };
+
+      if (allCompleted) {
+        parentUpdates.completedAt = serverTimestamp();
+      }
+
+      transaction.update(appointmentRef, parentUpdates);
+
+      return {
+        success: true,
+        completedTaskId: freshTarget.id,
+        completedServices: completedCount,
+        pendingServices: pendingCount,
+        allCompleted,
+        message: allCompleted
+          ? 'All service tasks have been completed.'
+          : 'Your assigned service task has been completed.'
+      };
+    });
+  };
+
   const getAppointmentFeedbackLink = (appointment) => {
     if (!appointment) {
       return '';
@@ -176,7 +441,6 @@ export function useAppointments() {
     return generateFeedbackLink(appointment.feedbackReference);
   };
 
-  // NEW: Copy a completed appointment's feedback reference.
   const copyFeedbackReference = async (appointment) => {
     setFeedbackCopyError('');
 
@@ -224,7 +488,6 @@ export function useAppointments() {
     }
   };
 
-  // NEW: Copy the personalized feedback link.
   const copyFeedbackLink = async (appointment) => {
     setFeedbackCopyError('');
 
@@ -309,9 +572,6 @@ export function useAppointments() {
     try {
       const appointmentsCollection = collection(db, 'appointments');
 
-      // Process in batches to avoid Firestore write batch limits.
-      // This deletes every document, not only the currently
-      // displayed or filtered appointments.
       while (true) {
         const snapshot = await getDocs(
           query(
@@ -361,12 +621,10 @@ export function useAppointments() {
     clearingAppointments,
     clearAllAppointments,
 
-    // Existing appointment functionality.
     approveAppointment: (id) => updateStatus(id, 'approved'),
     rejectAppointment: (id) => updateStatus(id, 'rejected'),
-    completeAppointment: (id) => updateStatus(id, 'completed'),
+    completeAppointment,
 
-    // NEW: Public feedback functionality.
     generateFeedbackLink,
     getAppointmentFeedbackLink,
     copyFeedbackReference,

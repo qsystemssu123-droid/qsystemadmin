@@ -1,10 +1,22 @@
-
 import {
   XCircle,
   AlertTriangle,
   Loader2,
   Play,
 } from "lucide-react";
+
+import { useEffect, useMemo, useState } from "react";
+
+import {
+  getAuth,
+  onAuthStateChanged,
+} from "firebase/auth";
+
+import {
+  doc,
+  getFirestore,
+  onSnapshot,
+} from "firebase/firestore";
 
 import WalkIn from "./walk-in";
 import Future from "./future";
@@ -16,13 +28,447 @@ import Pending, {
   ViewPriorityImage,
 } from "./pending";
 
+import Priority from "./priority";
+
 import useSWDS from "./hooks/useSWDS";
+
+// Firestore document containing the current SWDS service assignments.
+const ASSIGNMENT_DOC = "swds_service_assignments";
+const ASSIGNMENT_DOC_ID = "current";
+
+// The specific service that controls visibility of the Pending UI.
+const GUIDANCE_COUNSELING_SERVICE_ID = "guidance_counseling";
+
+const GUIDANCE_COUNSELING_SERVICE_NAMES = [
+  "guidance_counseling",
+  "Guidance and Counseling Services",
+  "Guidance & Counseling Services",
+];
+
+// SWDS services.
+// The IDs and names must match the Staff Management component.
+const SWDS_SERVICES = [
+  {
+    id: "admission_recruitment",
+    name: "Admission and Recruitment Services",
+  },
+  {
+    id: "psychological_wellness",
+    name: "Psychological and Wellness Services",
+  },
+  {
+    id: "guidance_counseling",
+    name: "Guidance and Counseling Services",
+  },
+  {
+    id: "information_orientation",
+    name: "Orientation and Information Services",
+  },
+  {
+    id: "career_placement_peso",
+    name: "Career and Placement Services and PESO",
+  },
+  {
+    id: "student_organizations",
+    name: "Student Organizations",
+  },
+  {
+    id: "special_needs_pwd",
+    name: "Services for Students with Special Needs & PWDs",
+  },
+  {
+    id: "economic_enterprise",
+    name: "Economic Enterprise Development",
+  },
+  {
+    id: "university_student_council",
+    name: "University Student Council",
+  },
+  {
+    id: "multi_faith",
+    name: "Multi-Faith Services",
+  },
+];
+
+const normalizeServiceName = (value = "") => {
+  return String(value)
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+// Extract service names and IDs from an appointment.
+// Supports the different service field formats used in Firestore.
+const getAppointmentServiceNames = (appointment = {}) => {
+  const services = [];
+
+  const addService = (value) => {
+    if (!value) return;
+
+    if (typeof value === "string") {
+      services.push(value);
+      return;
+    }
+
+    if (typeof value === "object" && !Array.isArray(value)) {
+      const possibleValues = [
+        value.serviceId,
+        value.service_id,
+        value.id,
+        value.serviceName,
+        value.service,
+        value.name,
+        value.label,
+        value.title,
+        value.value,
+      ];
+
+      possibleValues.forEach((item) => {
+        if (
+          item &&
+          typeof item === "string" &&
+          !services.includes(item)
+        ) {
+          services.push(item);
+        }
+      });
+    }
+  };
+
+  if (Array.isArray(appointment.services)) {
+    appointment.services.forEach(addService);
+  } else {
+    addService(appointment.services);
+  }
+
+  if (Array.isArray(appointment.selectedServices)) {
+    appointment.selectedServices.forEach(addService);
+  } else {
+    addService(appointment.selectedServices);
+  }
+
+  if (Array.isArray(appointment.serviceNames)) {
+    appointment.serviceNames.forEach(addService);
+  } else {
+    addService(appointment.serviceNames);
+  }
+
+  if (Array.isArray(appointment.serviceIds)) {
+    appointment.serviceIds.forEach(addService);
+  } else {
+    addService(appointment.serviceIds);
+  }
+
+  if (Array.isArray(appointment.selectedServiceIds)) {
+    appointment.selectedServiceIds.forEach(addService);
+  } else {
+    addService(appointment.selectedServiceIds);
+  }
+
+  addService(appointment.service);
+  addService(appointment.serviceName);
+  addService(appointment.selectedService);
+  addService(appointment.serviceId);
+  addService(appointment.service_id);
+
+  return [...new Set(services)];
+};
+
+// Determine whether an appointment belongs to one of the
+// specified services.
+const isAppointmentForAssignedServices = (
+  appointment = {},
+  assignedServiceNames = []
+) => {
+  if (!assignedServiceNames.length) {
+    return false;
+  }
+
+  const appointmentServices =
+    getAppointmentServiceNames(appointment);
+
+  if (!appointmentServices.length) {
+    return false;
+  }
+
+  const normalizedAppointmentServices =
+    appointmentServices.map(normalizeServiceName);
+
+  return normalizedAppointmentServices.some((appointmentService) =>
+    assignedServiceNames.some(
+      (assignedService) =>
+        normalizeServiceName(assignedService) ===
+        appointmentService
+    )
+  );
+};
+
+// Check whether an appointment specifically belongs to
+// Guidance and Counseling Services.
+const isGuidanceCounselingAppointment = (appointment = {}) => {
+  return isAppointmentForAssignedServices(
+    appointment,
+    GUIDANCE_COUNSELING_SERVICE_NAMES
+  );
+};
+
+// Check whether the currently authenticated staff member
+// owns the current Guidance and Counseling assignment.
+//
+// Matches by UID first, and falls back to matching by email.
+const isStaffAssignedToService = (
+  assignment,
+  staff
+) => {
+  if (!assignment || !staff) {
+    return false;
+  }
+
+  const assignedStaffId = String(
+    assignment.staffId || ""
+  ).trim();
+
+  const currentUid = String(
+    staff.uid || ""
+  ).trim();
+
+  if (assignedStaffId && currentUid && assignedStaffId === currentUid) {
+    return true;
+  }
+
+  const assignedStaffEmail = String(
+    assignment.staffEmail || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const currentEmail = String(
+    staff.email || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  if (
+    assignedStaffEmail &&
+    currentEmail &&
+    assignedStaffEmail === currentEmail
+  ) {
+    return true;
+  }
+
+  return false;
+};
 
 export default function Swds({
   appointments = [],
   completeAppointment,
   setSelectedImage,
 }) {
+  const [currentStaff, setCurrentStaff] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+
+  /*
+   * Assignment listener state.
+   */
+  const [assignmentState, setAssignmentState] = useState({
+    assignments: {},
+    ready: false,
+    error: "",
+  });
+
+  // Listen for the currently authenticated staff member.
+  useEffect(() => {
+    const auth = getAuth();
+
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      (user) => {
+        setCurrentStaff(user || null);
+        setAuthReady(true);
+      },
+      (error) => {
+        console.error(
+          "SWDS authentication listener error:",
+          error
+        );
+
+        setCurrentStaff(null);
+        setAuthReady(true);
+      }
+    );
+
+    return () => unsubscribe();
+  }, []);
+
+  // Derive the current assignment data.
+  const serviceAssignments = useMemo(
+    () => assignmentState.assignments || {},
+    [assignmentState.assignments]
+  );
+
+  const assignmentsReady = Boolean(
+    authReady &&
+      currentStaff &&
+      assignmentState.ready
+  );
+
+  const assignmentError = assignmentState.error || "";
+
+  // Listen for service assignment changes in real time.
+  // Changes made in Staff Management automatically reflect
+  // on the staff dashboard.
+  useEffect(() => {
+    if (!authReady || !currentStaff) {
+      return;
+    }
+
+    const db = getFirestore();
+
+    const assignmentRef = doc(
+      db,
+      ASSIGNMENT_DOC,
+      ASSIGNMENT_DOC_ID
+    );
+
+    const unsubscribe = onSnapshot(
+      assignmentRef,
+      (snapshot) => {
+        const savedAssignments = snapshot.exists()
+          ? snapshot.data()?.assignments || {}
+          : {};
+
+        setAssignmentState({
+          assignments: savedAssignments,
+          ready: true,
+          error: "",
+        });
+      },
+      (error) => {
+        console.error(
+          "Error listening to SWDS service assignments:",
+          error
+        );
+
+        setAssignmentState({
+          assignments: {},
+          ready: true,
+          error:
+            "Unable to load your SWDS service assignments. Please contact the administrator.",
+        });
+      }
+    );
+
+    return () => unsubscribe();
+  }, [currentStaff, authReady]);
+
+  // Get the service IDs assigned to the currently logged-in staff member.
+  //
+  // The Staff Management component saves assignments using:
+  // {
+  //   staffId,
+  //   staffName,
+  //   staffEmail
+  // }
+  //
+  // UID is authoritative when staffId is available.
+  // Email is only used as a fallback.
+  const currentStaffAssignedServiceIds = useMemo(() => {
+    if (!currentStaff || !assignmentsReady) return [];
+
+    return Object.entries(serviceAssignments)
+      .filter(([serviceId, assignment]) => {
+        if (!assignment) return false;
+
+        const isValidService = SWDS_SERVICES.some(
+          (service) => service.id === serviceId
+        );
+
+        if (!isValidService) {
+          return false;
+        }
+
+        return isStaffAssignedToService(
+          assignment,
+          currentStaff
+        );
+      })
+      .map(([serviceId]) => serviceId);
+  }, [
+    currentStaff,
+    serviceAssignments,
+    assignmentsReady,
+  ]);
+
+  // Convert the assigned service IDs into both their IDs and names.
+  //
+  // This supports appointments that store either:
+  // - guidance_counseling
+  // - Guidance and Counseling Services
+  const currentStaffAssignedServiceNames = useMemo(() => {
+    if (!currentStaffAssignedServiceIds.length) {
+      return [];
+    }
+
+    const assignedServices = SWDS_SERVICES.filter(
+      (service) =>
+        currentStaffAssignedServiceIds.includes(service.id)
+    );
+
+    return assignedServices.flatMap((service) => [
+      service.id,
+      service.name,
+    ]);
+  }, [currentStaffAssignedServiceIds]);
+
+  /*
+   * GUIDANCE COUNSELING ASSIGNMENT CHECK.
+   *
+   * Checks whether the current staff member matches the
+   * saved assignment for guidance_counseling.
+   */
+  const isCurrentStaffAssignedToGuidanceCounseling =
+    useMemo(() => {
+      if (
+        !authReady ||
+        !assignmentsReady ||
+        !currentStaff
+      ) {
+        return false;
+      }
+
+      const guidanceAssignment =
+        serviceAssignments[GUIDANCE_COUNSELING_SERVICE_ID];
+
+      if (!guidanceAssignment) {
+        return false;
+      }
+
+      const isAssigned = isStaffAssignedToService(
+        guidanceAssignment,
+        currentStaff
+      );
+
+      console.log("SWDS Guidance Assignment Check:", {
+        currentStaffUid: currentStaff.uid || "",
+        currentStaffEmail: currentStaff.email || "",
+        assignedStaffId: guidanceAssignment.staffId || "",
+        assignedStaffEmail:
+          guidanceAssignment.staffEmail || "",
+        assignedServiceNames: currentStaffAssignedServiceNames,
+        isAssigned,
+      });
+
+      return isAssigned;
+    }, [
+      authReady,
+      assignmentsReady,
+      currentStaff,
+      serviceAssignments,
+      currentStaffAssignedServiceNames,
+    ]);
+
   const {
     officeName,
     todayKey,
@@ -69,6 +515,75 @@ export default function Swds({
     completeAppointment,
   });
 
+  // PRIORITY LANE:
+  //
+  // All SWDS staff can see all pending priority appointments.
+  // Do not filter this list according to service assignment.
+  const allPriorityLaneAppointments = useMemo(() => {
+    return Array.isArray(priorityLaneQueue)
+      ? priorityLaneQueue
+      : [];
+  }, [priorityLaneQueue]);
+
+  // NORMAL PENDING APPOINTMENTS:
+  //
+  // The Pending UI is exclusively for Guidance and Counseling.
+  //
+  // Only the staff member assigned to guidance_counseling
+  // receives Guidance and Counseling pending appointments.
+  const currentStaffNormalPendingAppointments = useMemo(() => {
+    if (
+      !authReady ||
+      !assignmentsReady ||
+      !currentStaff ||
+      !isCurrentStaffAssignedToGuidanceCounseling
+    ) {
+      return [];
+    }
+
+    const pendingList = Array.isArray(normalPendingAppointments)
+      ? normalPendingAppointments
+      : [];
+
+    return pendingList.filter(
+      isGuidanceCounselingAppointment
+    );
+  }, [
+    authReady,
+    assignmentsReady,
+    currentStaff,
+    isCurrentStaffAssignedToGuidanceCounseling,
+    normalPendingAppointments,
+  ]);
+
+  // Pending Approval metric:
+  // Only count Guidance and Counseling pending appointments
+  // when the current staff member owns that service assignment.
+  const currentStaffPendingCount = useMemo(() => {
+    if (
+      !authReady ||
+      !assignmentsReady ||
+      !currentStaff ||
+      !isCurrentStaffAssignedToGuidanceCounseling
+    ) {
+      return 0;
+    }
+
+    const pendingList = Array.isArray(pendingAppointments)
+      ? pendingAppointments
+      : [];
+
+    return pendingList.filter(
+      isGuidanceCounselingAppointment
+    ).length;
+  }, [
+    authReady,
+    assignmentsReady,
+    currentStaff,
+    isCurrentStaffAssignedToGuidanceCounseling,
+    pendingAppointments,
+  ]);
+
   return (
     <>
       {/* Walk-in registration component */}
@@ -112,6 +627,27 @@ export default function Swds({
         </div>
       )}
 
+      {/* Service assignment loading/error feedback */}
+      {authReady && currentStaff && !assignmentsReady && (
+        <div
+          role="status"
+          className="mb-4 flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm font-medium text-sky-700"
+        >
+          <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+          Loading your assigned SWDS services...
+        </div>
+      )}
+
+      {assignmentError && (
+        <div
+          role="alert"
+          className="mb-4 flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+          <span>{assignmentError}</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 w-full">
         {/* Left Column */}
         <div className="flex flex-col gap-4 sm:gap-6">
@@ -125,16 +661,49 @@ export default function Swds({
             setSelectedImage={setSelectedImage}
           />
 
-          {/* Reusable Pending Component */}
-          <Pending
+          {/* Reusable Priority Lane Component */}
+          {/* Visible to ALL SWDS staff, regardless of assignment. */}
+          <Priority
             officeName={officeName}
-            priorityLaneQueue={priorityLaneQueue}
-            normalPendingAppointments={normalPendingAppointments}
+            priorityLaneQueue={allPriorityLaneAppointments}
             processingId={processingId}
             onAccept={handleAcceptAppointment}
             onReject={openRejectModal}
             setSelectedImage={setSelectedImage}
           />
+
+          {/*
+            Reusable Normal Pending Appointments Component.
+
+            IMPORTANT:
+            The entire Pending component is rendered ONLY when
+            the currently authenticated staff member matches
+            the current Firestore assignment for guidance_counseling.
+
+            UID is authoritative when staffId exists.
+            Email is only used as a fallback when staffId is unavailable.
+
+            The assigned service names are also checked to ensure
+            the current staff member owns guidance_counseling.
+
+            If the administrator changes the assigned staff member,
+            the real-time Firestore listener updates this condition.
+          */}
+          {authReady &&
+            assignmentsReady &&
+            currentStaff &&
+            isCurrentStaffAssignedToGuidanceCounseling && (
+              <Pending
+                officeName={officeName}
+                normalPendingAppointments={
+                  currentStaffNormalPendingAppointments
+                }
+                processingId={processingId}
+                onAccept={handleAcceptAppointment}
+                onReject={openRejectModal}
+                setSelectedImage={setSelectedImage}
+              />
+            )}
 
           <Later
             appointments={laterDisplayAppointments}
@@ -271,7 +840,9 @@ export default function Swds({
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-xl bg-amber-50 p-3 text-center">
                 <p className="text-xl font-bold text-amber-700">
-                  {pendingAppointments.length}
+                  {authReady && assignmentsReady
+                    ? currentStaffPendingCount
+                    : 0}
                 </p>
 
                 <p className="text-xs text-amber-700">
@@ -421,11 +992,6 @@ export default function Swds({
                 value={rejectionReason}
                 onChange={(event) => {
                   setRejectionReason(event.target.value);
-
-                  if (rejectionError) {
-                    // The hook owns the rejection error state.
-                    // Clear it through the returned setter.
-                  }
                 }}
                 placeholder="Explain why this appointment is being rejected..."
                 rows={4}

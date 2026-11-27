@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const { setGlobalOptions } = require("firebase-functions/v2");
 const { onRequest } = require("firebase-functions/v2/https");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 
 const logger = require("firebase-functions/logger");
 
@@ -14,7 +15,6 @@ const {
   FieldValue,
 } = require("firebase-admin/firestore");
 
-// Initialize Firebase Admin only once.
 if (!getApps().length) {
   initializeApp();
 }
@@ -28,13 +28,27 @@ setGlobalOptions({
 
 const TOKEN_COLLECTION = "publicFeedbackTokens";
 const APPOINTMENT_COLLECTION = "appointments";
+const SERVICE_TASK_COLLECTION = "appointment_services";
 const RATING_COLLECTION = "rating";
 
 const TOKEN_PATTERN = /^[a-f0-9]{48}$/;
 const MAX_REVIEW_LENGTH = 1000;
 
+const SWDS_OFFICE = "SWDS";
+const SWDS_QUEUE_COLLECTION = "queues";
+const SWDS_COUNTER_COLLECTION = "queue-counters";
+const PHILIPPINE_TIME_ZONE = "Asia/Manila";
+
+const GUIDANCE_COUNSELING_SERVICE_ID = "guidance_counseling";
+
+const COUNSELING_SERVICES = [
+  "Guidance & Counseling Services",
+  "Guidance and Counseling Services",
+  GUIDANCE_COUNSELING_SERVICE_ID,
+];
+
 // =========================================
-// FEEDBACK REFERENCE UTILITIES
+// SHARED UTILITIES
 // =========================================
 
 function hashToken (token) {
@@ -53,9 +67,7 @@ function respond (res, status, data) {
 }
 
 function formatTimestamp (value) {
-  if (!value) {
-    return null;
-  }
+  if (!value) return null;
 
   if (typeof value.toDate === "function") {
     return value.toDate().toISOString();
@@ -87,17 +99,14 @@ function getErrorResponse (error) {
       status: 404,
       message: "Feedback reference not found.",
     },
-
     ALREADY_RATED: {
       status: 409,
       message: "This appointment has already been rated.",
     },
-
     APPOINTMENT_NOT_FOUND: {
       status: 404,
       message: "Appointment not found.",
     },
-
     NOT_COMPLETED: {
       status: 403,
       message: "Only completed appointments can be rated.",
@@ -131,40 +140,785 @@ function validateReview (reviewText) {
 }
 
 // =========================================
-// RECOVER OR CREATE TOKEN RECORD
+// SWDS AUTOMATIC APPROVAL UTILITIES
 // =========================================
-//
-// WalkIn.jsx already generates feedbackReference
-// and saves it directly inside appointments.
-//
-// The original code did not create a matching
-// publicFeedbackTokens document when a reference
-// already existed.
-//
-// This function recovers the appointment using
-// its existing feedbackReference and creates the
-// missing hashed token document.
-//
-// It does NOT generate a different reference.
-//
 
-async function getOrCreateTokenRecord (token) {
-  if (!validateToken(token)) {
+function normalizeServiceName (value) {
+  return typeof value === "string"
+    ? value
+      .trim()
+      .replace(/&/g, "and")
+      .replace(/[^\w\s-]/g, "")
+      .replace(/\s+/g, " ")
+      .toLowerCase()
+    : "";
+}
+
+function getAppointmentServices (item) {
+  const services = [];
+
+  const addService = (value) => {
+    if (typeof value === "string") {
+      const normalized = value.trim();
+
+      if (normalized) services.push(normalized);
+      return;
+    }
+
+    if (value && typeof value === "object") {
+      [
+        value.serviceName,
+        value.name,
+        value.label,
+        value.service,
+        value.title,
+        value.serviceId,
+        value.service_id,
+        value.id,
+        value.value,
+      ].forEach((name) => {
+        if (typeof name === "string" && name.trim()) {
+          services.push(name.trim());
+        }
+      });
+    }
+  };
+
+  [
+    "services",
+    "selectedServices",
+    "serviceNames",
+    "serviceIds",
+    "selectedServiceIds",
+  ].forEach((field) => {
+    if (Array.isArray(item?.[field])) {
+      item[field].forEach(addService);
+    }
+  });
+
+  if (typeof item?.service === "string") {
+    item.service.split(",").forEach(addService);
+  }
+
+  [
+    "serviceName",
+    "selectedService",
+    "serviceId",
+    "service_id",
+  ].forEach((field) => {
+    if (typeof item?.[field] === "string") {
+      addService(item[field]);
+    }
+  });
+
+  return [...new Set(services)];
+}
+
+function requiresCounselingConfirmation (item) {
+  const selectedServices = getAppointmentServices(item).map(
+    normalizeServiceName,
+  );
+
+  const counselingNames = COUNSELING_SERVICES.map(
+    normalizeServiceName,
+  );
+
+  return selectedServices.some((service) =>
+    counselingNames.includes(service),
+  );
+}
+
+function belongsToSWDS (item) {
+  const office = String(
+    item?.office ||
+      item?.officeName ||
+      item?.department ||
+      "",
+  )
+    .trim()
+    .toLowerCase();
+
+  return (
+    office === "swds" ||
+    office.startsWith("swds -") ||
+    office.startsWith("swds ") ||
+    office.includes("swds")
+  );
+}
+
+function getManilaDateTime (date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: PHILIPPINE_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  const value = (type) =>
+    parts.find((part) => part.type === type)?.value || "";
+
+  const hour = Number(value("hour"));
+  const minute = Number(value("minute"));
+
+  return {
+    date: `${value("year")}-${value("month")}-${value("day")}`,
+    hour,
+    minutes: hour * 60 + minute,
+  };
+}
+
+function getScheduledDate (item) {
+  const value =
+    item?.rescheduledToDate ||
+    item?.appointmentDate ||
+    "";
+
+  if (!value) return "";
+
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : value;
+  }
+
+  const date =
+    typeof value?.toDate === "function"
+      ? value.toDate()
+      : value instanceof Date
+        ? value
+        : null;
+
+  if (!date || Number.isNaN(date.getTime())) return "";
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: PHILIPPINE_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const valueOf = (type) =>
+    parts.find((part) => part.type === type)?.value || "";
+
+  return `${valueOf("year")}-${valueOf("month")}-${valueOf("day")}`;
+}
+
+function getScheduledTime (item) {
+  return item?.rescheduledToTime || item?.appointmentTime || "";
+}
+
+function convertTimeToMinutes (time) {
+  if (typeof time !== "string" || !time.trim()) {
     return null;
   }
+
+  const normalized = time.trim().toUpperCase();
+
+  const twelveHourMatch = normalized.match(
+    /^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/,
+  );
+
+  if (twelveHourMatch) {
+    let hours = Number(twelveHourMatch[1]);
+    const minutes = Number(twelveHourMatch[2]);
+    const period = twelveHourMatch[3];
+
+    if (
+      hours < 1 ||
+      hours > 12 ||
+      minutes < 0 ||
+      minutes > 59
+    ) {
+      return null;
+    }
+
+    if (period === "AM") {
+      if (hours === 12) hours = 0;
+    } else if (hours !== 12) {
+      hours += 12;
+    }
+
+    return hours * 60 + minutes;
+  }
+
+  const twentyFourHourMatch = normalized.match(
+    /^(\d{1,2}):(\d{2})(?::\d{2})?$/,
+  );
+
+  if (twentyFourHourMatch) {
+    const hours = Number(twentyFourHourMatch[1]);
+    const minutes = Number(twentyFourHourMatch[2]);
+
+    if (
+      hours < 0 ||
+      hours > 23 ||
+      minutes < 0 ||
+      minutes > 59
+    ) {
+      return null;
+    }
+
+    return hours * 60 + minutes;
+  }
+
+  return null;
+}
+
+function isAppointmentReady (item, currentDateTime) {
+  const scheduledDate = getScheduledDate(item);
+  const scheduledMinutes = convertTimeToMinutes(
+    getScheduledTime(item),
+  );
+
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate) ||
+    scheduledMinutes === null
+  ) {
+    return false;
+  }
+
+  if (scheduledDate > currentDateTime.date) return false;
+  if (scheduledDate < currentDateTime.date) return true;
+
+  return scheduledMinutes <= currentDateTime.minutes;
+}
+
+function readQueueTickets (data) {
+  return Array.isArray(data?.tickets) ? data.tickets : [];
+}
+
+function getHighestQueueNumber (tickets) {
+  return tickets.reduce((highest, ticket) => {
+    const match = String(ticket?.queueNumber || "").match(
+      /^SWDS-?(\d+)$/i,
+    );
+
+    return match
+      ? Math.max(highest, Number(match[1]))
+      : highest;
+  }, 0);
+}
+
+function makePublicTicket (
+  appointmentId,
+  appointment,
+  queueNumber,
+  queueDate,
+  queueHour,
+  queuePosition,
+) {
+  return {
+    appointmentId,
+    queueNumber,
+    status: "approved",
+    isPriority: appointment.isPriority === true,
+    queuePosition,
+    queueDate,
+    queueHour,
+  };
+}
+
+// =========================================
+// SWDS SERVICE TASK UTILITIES
+// =========================================
+
+function getServiceTaskIds (appointment) {
+  const ids = new Set();
+
+  if (Array.isArray(appointment?.serviceTaskIds)) {
+    appointment.serviceTaskIds.forEach((id) => {
+      if (typeof id === "string" && id.trim()) {
+        ids.add(id.trim());
+      }
+    });
+  }
+
+  if (Array.isArray(appointment?.services)) {
+    appointment.services.forEach((service) => {
+      if (!service || typeof service !== "object") return;
+
+      const id =
+        service.serviceTaskId ||
+        service.serviceTaskID ||
+        service.taskId ||
+        "";
+
+      if (typeof id === "string" && id.trim()) {
+        ids.add(id.trim());
+      }
+    });
+  }
+
+  return [...ids];
+}
+
+function belongsToAppointment (task, appointmentId) {
+  const taskAppointmentId =
+    task?.appointmentId ||
+    task?.parentAppointmentId ||
+    "";
+
+  return !taskAppointmentId || taskAppointmentId === appointmentId;
+}
+
+function isApprovableTaskStatus (task) {
+  const status = String(task?.status || "pending")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+  return ["pending", "waiting"].includes(status);
+}
+
+function updateEmbeddedServices (
+  services,
+  queueNumber,
+  queuePosition,
+  queueDate,
+  queueHour,
+) {
+  if (!Array.isArray(services)) return services;
+
+  return services.map((service) => {
+    if (!service || typeof service !== "object") {
+      return service;
+    }
+
+    const serviceName = normalizeServiceName(
+      service.serviceName ||
+      service.name ||
+      service.label ||
+      service.service ||
+      service.serviceId ||
+      service.id ||
+      "",
+    );
+
+    const counselingNames = COUNSELING_SERVICES.map(
+      normalizeServiceName,
+    );
+
+    if (counselingNames.includes(serviceName)) {
+      return service;
+    }
+
+    const status = String(service.status || "pending")
+      .trim()
+      .toLowerCase();
+
+    if (!["pending", "waiting"].includes(status)) {
+      return service;
+    }
+
+    return {
+      ...service,
+      status: "approved",
+      queueNumber,
+      queuePosition,
+      queueDate,
+      queueHour,
+      approvedAt: new Date(),
+      approvedBy: "system",
+      approvedByEmail: "",
+    };
+  });
+}
+
+// =========================================
+// SWDS AUTOMATIC APPROVAL PROCESSOR
+// =========================================
+//
+// Runs every minute, independently of staff dashboards.
+//
+// Non-Guidance SWDS appointments are approved when their
+// scheduled Manila date and time arrive.
+//
+// Guidance & Counseling remains pending for manual approval.
+//
+// Queue allocation uses the same office-wide counter and
+// public queue documents used by the SWDS staff application.
+//
+// Parent appointments, child service tasks, and embedded
+// services are updated together in one Firestore transaction.
+//
+
+async function automaticallyApproveSWDSAppointment (
+  appointmentRef,
+) {
+  const counterRef = db
+    .collection(SWDS_COUNTER_COLLECTION)
+    .doc(SWDS_OFFICE);
+
+  const publicQueueRef = db
+    .collection(SWDS_QUEUE_COLLECTION)
+    .doc(SWDS_OFFICE);
+
+  return db.runTransaction(async (transaction) => {
+    // =========================================
+    // READ PARENT, COUNTER, AND PUBLIC QUEUE
+    // =========================================
+
+    const appointmentSnapshot = await transaction.get(
+      appointmentRef,
+    );
+
+    const counterSnapshot = await transaction.get(counterRef);
+    const publicSnapshot = await transaction.get(publicQueueRef);
+
+    if (!appointmentSnapshot.exists) {
+      return { approved: false, reason: "not-found" };
+    }
+
+    const appointment = appointmentSnapshot.data();
+
+    const status = String(appointment.status || "pending")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+
+    if (!["pending", "waiting"].includes(status)) {
+      return { approved: false, reason: "already-processed" };
+    }
+
+    if (!belongsToSWDS(appointment)) {
+      return { approved: false, reason: "different-office" };
+    }
+
+    if (requiresCounselingConfirmation(appointment)) {
+      return {
+        approved: false,
+        reason: "manual-guidance-approval",
+      };
+    }
+
+    const approvalDateTime = getManilaDateTime();
+
+    if (!isAppointmentReady(appointment, approvalDateTime)) {
+      return { approved: false, reason: "not-yet-scheduled" };
+    }
+
+    const dateKey = approvalDateTime.date;
+    const hourKey = approvalDateTime.hour;
+
+    // =========================================
+    // READ CHILD SERVICE TASKS
+    // =========================================
+
+    const appointmentId = appointmentRef.id;
+    const serviceTaskIds = getServiceTaskIds(appointment);
+
+    const serviceTaskRefs = serviceTaskIds.map((taskId) =>
+      db.collection(SERVICE_TASK_COLLECTION).doc(taskId),
+    );
+
+    const serviceTaskSnapshots = [];
+
+    for (const taskRef of serviceTaskRefs) {
+      const taskSnapshot = await transaction.get(taskRef);
+      serviceTaskSnapshots.push(taskSnapshot);
+    }
+
+    // Find tasks linked through appointmentId.
+    const appointmentTaskQuery = db
+      .collection(SERVICE_TASK_COLLECTION)
+      .where("appointmentId", "==", appointmentId);
+
+    const queriedAppointmentTasks = await transaction.get(
+      appointmentTaskQuery,
+    );
+
+    // Also find tasks linked through parentAppointmentId.
+    const parentTaskQuery = db
+      .collection(SERVICE_TASK_COLLECTION)
+      .where("parentAppointmentId", "==", appointmentId);
+
+    const queriedParentTasks = await transaction.get(
+      parentTaskQuery,
+    );
+
+    const serviceTaskMap = new Map();
+
+    const addTaskSnapshot = (snapshot) => {
+      if (!snapshot.exists) return;
+
+      const task = snapshot.data();
+
+      if (!belongsToAppointment(task, appointmentId)) {
+        return;
+      }
+
+      serviceTaskMap.set(snapshot.id, snapshot);
+    };
+
+    serviceTaskSnapshots.forEach(addTaskSnapshot);
+    queriedAppointmentTasks.docs.forEach(addTaskSnapshot);
+    queriedParentTasks.docs.forEach(addTaskSnapshot);
+
+    // Only update tasks that are still pending or waiting.
+    const eligibleServiceTasks = [...serviceTaskMap.values()]
+      .filter((snapshot) =>
+        isApprovableTaskStatus(snapshot.data()),
+      );
+
+    // =========================================
+    // CALCULATE QUEUE NUMBER
+    // =========================================
+
+    const counterData = counterSnapshot.exists
+      ? counterSnapshot.data()
+      : {};
+
+    const sameHourCounter =
+      counterData.queueDate === dateKey &&
+      Number(counterData.queueHour) === hourKey
+        ? Number(counterData.lastNumber || 0)
+        : 0;
+
+    const publicData = publicSnapshot.exists
+      ? publicSnapshot.data()
+      : {};
+
+    const sameHourPublicQueue =
+      publicData.queueDate === dateKey &&
+      Number(publicData.queueHour) === hourKey;
+
+    const existingTickets = sameHourPublicQueue
+      ? readQueueTickets(publicData)
+      : [];
+
+    const highestPublicNumber =
+      getHighestQueueNumber(existingTickets);
+
+    const nextNumber =
+      Math.max(sameHourCounter, highestPublicNumber) + 1;
+
+    const queueNumber = `SWDS-${String(nextNumber).padStart(3, "0")}`;
+
+    const updatedTickets = [
+      ...existingTickets.filter(
+        (ticket) => ticket.appointmentId !== appointmentId,
+      ),
+      makePublicTicket(
+        appointmentId,
+        appointment,
+        queueNumber,
+        dateKey,
+        hourKey,
+        nextNumber,
+      ),
+    ];
+
+    // =========================================
+    // UPDATE QUEUE COUNTER
+    // =========================================
+
+    transaction.set(
+      counterRef,
+      {
+        office: SWDS_OFFICE,
+        queueDate: dateKey,
+        queueHour: hourKey,
+        lastNumber: nextNumber,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    // =========================================
+    // UPDATE PUBLIC QUEUE
+    // =========================================
+
+    transaction.set(
+      publicQueueRef,
+      {
+        office: SWDS_OFFICE,
+        queueDate: dateKey,
+        queueHour: hourKey,
+        nowServing: sameHourPublicQueue
+          ? publicData.nowServing || ""
+          : "",
+        tickets: updatedTickets,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    // =========================================
+    // UPDATE CHILD SERVICE TASKS
+    // =========================================
+
+    let updatedServiceTaskCount = 0;
+
+    eligibleServiceTasks.forEach((snapshot) => {
+      transaction.update(snapshot.ref, {
+        status: "approved",
+        queueNumber,
+        queuePosition: nextNumber,
+        queueDate: dateKey,
+        queueHour: hourKey,
+        approvedAt: FieldValue.serverTimestamp(),
+        approvedBy: "system",
+        approvedByEmail: "",
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      updatedServiceTaskCount++;
+    });
+
+    // =========================================
+    // UPDATE PARENT APPOINTMENT
+    // =========================================
+
+    const parentUpdate = {
+      status: "approved",
+      queueNumber,
+      queuePosition: nextNumber,
+      queueDate: dateKey,
+      queueHour: hourKey,
+      approvedAt: FieldValue.serverTimestamp(),
+      approvedBy: "system",
+      approvedByEmail: "",
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+
+    if (Array.isArray(appointment.services)) {
+      parentUpdate.services = updateEmbeddedServices(
+        appointment.services,
+        queueNumber,
+        nextNumber,
+        dateKey,
+        hourKey,
+      );
+    }
+
+    if (typeof appointment.pendingServices === "number") {
+      parentUpdate.pendingServices = Math.max(
+        0,
+        appointment.pendingServices - updatedServiceTaskCount,
+      );
+    }
+
+    transaction.update(appointmentRef, parentUpdate);
+
+    return {
+      approved: true,
+      appointmentId,
+      queueNumber,
+      updatedServiceTaskCount,
+    };
+  });
+}
+
+// =========================================
+// SWDS AUTOMATIC APPROVAL SCHEDULE
+// =========================================
+
+exports.autoApproveSWDSAppointments = onSchedule(
+  {
+    schedule: "every 1 minutes",
+    timeZone: PHILIPPINE_TIME_ZONE,
+    retryCount: 0,
+    maxInstances: 1,
+  },
+  async () => {
+    logger.info("Starting SWDS automatic appointment approval.");
+
+    const [pendingSnapshot, waitingSnapshot] = await Promise.all([
+      db
+        .collection(APPOINTMENT_COLLECTION)
+        .where("status", "==", "pending")
+        .get(),
+
+      db
+        .collection(APPOINTMENT_COLLECTION)
+        .where("status", "==", "waiting")
+        .get(),
+    ]);
+
+    const appointments = new Map();
+
+    pendingSnapshot.docs.forEach((snapshot) => {
+      appointments.set(snapshot.id, snapshot);
+    });
+
+    waitingSnapshot.docs.forEach((snapshot) => {
+      appointments.set(snapshot.id, snapshot);
+    });
+
+    let approvedCount = 0;
+    let skippedCount = 0;
+    let failedCount = 0;
+
+    for (const snapshot of appointments.values()) {
+      const appointment = snapshot.data();
+
+      if (!belongsToSWDS(appointment)) continue;
+
+      if (requiresCounselingConfirmation(appointment)) {
+        skippedCount++;
+        continue;
+      }
+
+      if (!isAppointmentReady(appointment, getManilaDateTime())) {
+        continue;
+      }
+
+      try {
+        const result = await automaticallyApproveSWDSAppointment(
+          snapshot.ref,
+        );
+
+        if (result.approved) {
+          approvedCount++;
+
+          logger.info("SWDS appointment automatically approved.", {
+            appointmentId: result.appointmentId,
+            queueNumber: result.queueNumber,
+            updatedServiceTaskCount: result.updatedServiceTaskCount,
+          });
+        } else {
+          skippedCount++;
+
+          logger.info("SWDS appointment skipped during approval.", {
+            appointmentId: snapshot.id,
+            reason: result.reason,
+          });
+        }
+      } catch (error) {
+        failedCount++;
+
+        logger.error("SWDS automatic approval failed.", {
+          appointmentId: snapshot.id,
+          error: error.message,
+        });
+      }
+    }
+
+    logger.info("SWDS automatic approval finished.", {
+      approvedCount,
+      skippedCount,
+      failedCount,
+    });
+  },
+);
+
+// =========================================
+// RECOVER OR CREATE TOKEN RECORD
+// =========================================
+
+async function getOrCreateTokenRecord (token) {
+  if (!validateToken(token)) return null;
 
   const tokenRef = db
     .collection(TOKEN_COLLECTION)
     .doc(hashToken(token));
 
-  // Check whether the token record already exists.
   const existingToken = await tokenRef.get();
 
-  if (existingToken.exists) {
-    return existingToken;
-  }
+  if (existingToken.exists) return existingToken;
 
-  // Find the appointment containing this exact reference.
   const matchingAppointments = await db
     .collection(APPOINTMENT_COLLECTION)
     .where("feedbackReference", "==", token)
@@ -173,14 +927,11 @@ async function getOrCreateTokenRecord (token) {
 
   if (matchingAppointments.empty) {
     logger.warn("Feedback reference not found in appointments.");
-
     return null;
   }
 
-  // A feedback reference must belong to one appointment only.
   if (matchingAppointments.size > 1) {
     logger.error("Duplicate feedback references detected.");
-
     return null;
   }
 
@@ -190,32 +941,20 @@ async function getOrCreateTokenRecord (token) {
     .collection(APPOINTMENT_COLLECTION)
     .doc(matchingAppointment.id);
 
-  // Create the missing token document transactionally.
   await db.runTransaction(async (transaction) => {
-    // Read the token document first.
     const currentToken = await transaction.get(tokenRef);
 
-    if (currentToken.exists) {
-      return;
-    }
+    if (currentToken.exists) return;
 
-    // Read the appointment.
     const appointmentSnapshot =
       await transaction.get(appointmentRef);
 
-    if (!appointmentSnapshot.exists) {
-      return;
-    }
+    if (!appointmentSnapshot.exists) return;
 
     const appointment = appointmentSnapshot.data();
 
-    // Confirm that the original reference still belongs
-    // to this appointment.
-    if (appointment.feedbackReference !== token) {
-      return;
-    }
+    if (appointment.feedbackReference !== token) return;
 
-    // Create the matching hashed token document.
     transaction.create(tokenRef, {
       appointmentId: matchingAppointment.id,
       createdAt: FieldValue.serverTimestamp(),
@@ -227,19 +966,16 @@ async function getOrCreateTokenRecord (token) {
     });
   });
 
-  // Retrieve the token document after the transaction.
   const finalToken = await tokenRef.get();
 
-  if (!finalToken.exists) {
-    return null;
-  }
+  if (!finalToken.exists) return null;
 
-  // Make sure the token belongs to the expected appointment.
   if (
     finalToken.data().appointmentId !== matchingAppointment.id
   ) {
-    logger.error("Feedback token is associated with another appointment.");
-
+    logger.error(
+      "Feedback token is associated with another appointment.",
+    );
     return null;
   }
 
@@ -249,15 +985,6 @@ async function getOrCreateTokenRecord (token) {
 // =========================================
 // AUTOMATIC FEEDBACK REFERENCE ISSUANCE
 // =========================================
-//
-// Automatically processes an appointment when
-// its status becomes completed.
-//
-// 1. Preserve an existing valid feedbackReference.
-// 2. Generate a reference only if one is missing or invalid.
-// 3. Create the corresponding hashed token document.
-// 4. Never overwrite an existing valid reference.
-//
 
 exports.issuePublicFeedbackReference = onDocumentWritten(
   {
@@ -267,9 +994,7 @@ exports.issuePublicFeedbackReference = onDocumentWritten(
   async (event) => {
     const after = event.data?.after;
 
-    if (!after || !after.exists) {
-      return;
-    }
+    if (!after || !after.exists) return;
 
     const appointment = after.data();
 
@@ -285,21 +1010,14 @@ exports.issuePublicFeedbackReference = onDocumentWritten(
 
     try {
       await db.runTransaction(async (transaction) => {
-        // Read the current appointment.
         const current = await transaction.get(appointmentRef);
 
-        if (!current.exists) {
-          return;
-        }
+        if (!current.exists) return;
 
         const data = current.data();
 
-        if (data.status !== "completed") {
-          return;
-        }
+        if (data.status !== "completed") return;
 
-        // Preserve the reference generated by WalkIn.jsx.
-        // Only generate a new reference if it is missing or invalid.
         let token = data.feedbackReference;
 
         if (!validateToken(token)) {
@@ -312,31 +1030,24 @@ exports.issuePublicFeedbackReference = onDocumentWritten(
           .collection(TOKEN_COLLECTION)
           .doc(tokenHash);
 
-        // Read the token document before writing.
         const existingToken = await transaction.get(tokenRef);
 
         if (existingToken.exists) {
           const existingData = existingToken.data();
 
-          // Prevent one feedback reference from being
-          // associated with multiple appointments.
           if (existingData.appointmentId !== appointmentId) {
             throw new Error("FEEDBACK_TOKEN_COLLISION");
           }
 
-          // The token document already exists and is correct.
           return;
         }
 
-        // Create the matching token document.
         transaction.create(tokenRef, {
           appointmentId,
           createdAt: FieldValue.serverTimestamp(),
           used: false,
         });
 
-        // Only update the appointment if a new reference
-        // was necessary.
         if (data.feedbackReference !== token) {
           transaction.update(appointmentRef, {
             feedbackReference: token,
@@ -366,15 +1077,6 @@ exports.issuePublicFeedbackReference = onDocumentWritten(
 // =========================================
 // PUBLIC FEEDBACK API
 // =========================================
-//
-// POST /verify
-// POST /submit
-//
-// No Firebase Authentication is required for visitors.
-//
-// A valid feedback reference must belong to an
-// existing completed appointment.
-//
 
 exports.publicFeedbackApi = onRequest(
   {
@@ -392,9 +1094,7 @@ exports.publicFeedbackApi = onRequest(
       });
     }
 
-    // Normalize the endpoint path.
     const route = (req.path || "/").replace(/\/+$/, "") || "/";
-
     const token = req.body?.token;
 
     if (route !== "/verify" && route !== "/submit") {
@@ -414,14 +1114,7 @@ exports.publicFeedbackApi = onRequest(
       .doc(hashToken(token));
 
     try {
-      // =========================================
-      // VERIFY COMPLETED APPOINTMENT
-      // =========================================
-
       if (route === "/verify") {
-        // Retrieve the token.
-        // If it is missing, recover it using the
-        // original feedbackReference in appointments.
         const ticket = await getOrCreateTokenRecord(token);
 
         if (!ticket || !ticket.exists) {
@@ -432,10 +1125,7 @@ exports.publicFeedbackApi = onRequest(
 
         const ticketData = ticket.data();
 
-        if (
-          ticketData.used === true ||
-          ticketData.usedAt
-        ) {
+        if (ticketData.used === true || ticketData.usedAt) {
           return respond(res, 409, {
             error: "This appointment has already been rated.",
           });
@@ -472,15 +1162,12 @@ exports.publicFeedbackApi = onRequest(
           });
         }
 
-        // Ensure this reference belongs to the appointment.
         if (appointment.feedbackReference !== token) {
           return respond(res, 403, {
             error: "Feedback reference is no longer valid.",
           });
         }
 
-        // Check ratings previously submitted through
-        // the mobile application or public website.
         const existingRatings = await db
           .collection(RATING_COLLECTION)
           .where("appointmentId", "==", appointmentId)
@@ -498,10 +1185,6 @@ exports.publicFeedbackApi = onRequest(
           appointment: safeAppointment(appointment),
         });
       }
-
-      // =========================================
-      // SUBMIT RATING AND REVIEW
-      // =========================================
 
       if (route === "/submit") {
         const rating = req.body?.rating;
@@ -521,8 +1204,6 @@ exports.publicFeedbackApi = onRequest(
 
         const cleanReview = reviewText.trim();
 
-        // Recover a missing token record before submitting.
-        // This supports references generated by WalkIn.jsx.
         const ticket = await getOrCreateTokenRecord(token);
 
         if (!ticket || !ticket.exists) {
@@ -532,7 +1213,6 @@ exports.publicFeedbackApi = onRequest(
         }
 
         await db.runTransaction(async (transaction) => {
-          // All transaction reads happen before writes.
           const currentTicket = await transaction.get(tokenRef);
 
           if (!currentTicket.exists) {
@@ -541,10 +1221,7 @@ exports.publicFeedbackApi = onRequest(
 
           const ticketData = currentTicket.data();
 
-          if (
-            ticketData.used === true ||
-            ticketData.usedAt
-          ) {
+          if (ticketData.used === true || ticketData.usedAt) {
             throw new Error("ALREADY_RATED");
           }
 
@@ -578,8 +1255,6 @@ exports.publicFeedbackApi = onRequest(
             throw new Error("INVALID_REFERENCE");
           }
 
-          // Deterministic ID prevents duplicate public
-          // submissions for the same appointment.
           const ratingRef = db
             .collection(RATING_COLLECTION)
             .doc(`public_${appointmentId}`);
@@ -591,8 +1266,6 @@ exports.publicFeedbackApi = onRequest(
             throw new Error("ALREADY_RATED");
           }
 
-          // Also check existing mobile-app ratings,
-          // which may use automatically generated IDs.
           const existingQuery = db
             .collection(RATING_COLLECTION)
             .where("appointmentId", "==", appointmentId)
@@ -605,7 +1278,6 @@ exports.publicFeedbackApi = onRequest(
             throw new Error("ALREADY_RATED");
           }
 
-          // All reads are complete. Perform writes.
           transaction.create(ratingRef, {
             appointmentId,
             createdAt: FieldValue.serverTimestamp(),
@@ -620,7 +1292,6 @@ exports.publicFeedbackApi = onRequest(
             userId: appointment.userId || "",
           });
 
-          // Mark the feedback reference as used.
           transaction.update(tokenRef, {
             used: true,
             usedAt: FieldValue.serverTimestamp(),
