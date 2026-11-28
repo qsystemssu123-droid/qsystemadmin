@@ -32,7 +32,7 @@ import {
 import APP_LOGO from "../assets/QueueMatrix.png";
 
 const APK_DOWNLOAD_URL =
-  "https://github.com/qsystemssu123-droid/qsystemadmin/releases/download/v1.0.2/QueueMatrix.apk";
+  "https://github.com/qsystemssu123-droid/qsystemadmin/releases/download/v1.0.3/QueueMatrix.apk";
 
 const APP_NAME = "QueueMatrix";
 const APP_VERSION = "1.0.2";

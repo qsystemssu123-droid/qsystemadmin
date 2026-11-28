@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState } from 'react';
 import {
   Search,
@@ -31,6 +30,124 @@ import {
 import { auth, db } from '../../services/firebase.js';
 
 const ADMIN_EMAIL = 'qsystemssu123@gmail.com';
+
+// Normalize service IDs and names for reliable matching.
+const normalizeService = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, ' ');
+
+// Get the services assigned to a staff member.
+const getStaffServices = (staffData) => {
+  const services = [
+    ...(Array.isArray(staffData?.services) ? staffData.services : []),
+    ...(Array.isArray(staffData?.serviceIds) ? staffData.serviceIds : []),
+    ...(Array.isArray(staffData?.assignedServices)
+      ? staffData.assignedServices
+      : [])
+  ];
+
+  return services
+    .flatMap((service) => {
+      if (typeof service === 'string') {
+        return [normalizeService(service)];
+      }
+
+      if (service && typeof service === 'object') {
+        return [
+          service.id,
+          service.serviceId,
+          service.name,
+          service.serviceName,
+          service.label
+        ]
+          .filter(Boolean)
+          .map(normalizeService);
+      }
+
+      return [];
+    })
+    .filter(Boolean);
+};
+
+// Get service IDs and names attached to an appointment or service task.
+const getAppointmentServices = (appointment) => {
+  if (!appointment || typeof appointment !== 'object') {
+    return [];
+  }
+
+  const values = [
+    appointment.serviceId,
+    appointment.serviceName,
+    appointment.service,
+    appointment.assignedService,
+    appointment.assignedServiceId
+  ];
+
+  const serviceArrays = [
+    appointment.services,
+    appointment.selectedServices,
+    appointment.appointmentServices
+  ];
+
+  serviceArrays.forEach((services) => {
+    if (!Array.isArray(services)) return;
+
+    services.forEach((service) => {
+      if (typeof service === 'string') {
+        values.push(service);
+      } else if (service && typeof service === 'object') {
+        values.push(
+          service.id,
+          service.serviceId,
+          service.name,
+          service.serviceName,
+          service.label
+        );
+      }
+    });
+  });
+
+  return values
+    .filter(Boolean)
+    .map(normalizeService);
+};
+
+// Check whether an appointment service belongs to a staff member.
+const appointmentMatchesStaffServices = (
+  appointment,
+  staffServices
+) => {
+  if (!staffServices?.length) {
+    return false;
+  }
+
+  const appointmentServices = getAppointmentServices(appointment);
+
+  return appointmentServices.some((service) =>
+    staffServices.includes(service)
+  );
+};
+
+// Check whether a service task is directly assigned to the staff member.
+const isTaskAssignedToStaff = (
+  task,
+  staffId,
+  staffEmail
+) => {
+  const assignedStaffId = String(task?.assignedStaffId || '').trim();
+  const assignedStaffEmail = String(
+    task?.assignedStaffEmail || ''
+  )
+    .trim()
+    .toLowerCase();
+
+  return (
+    (staffId && assignedStaffId === staffId) ||
+    (staffEmail && assignedStaffEmail === staffEmail.toLowerCase())
+  );
+};
 
 // Parse Firestore Timestamp, Date, ISO string, or date/time fields into milliseconds.
 const getAppointmentMillis = (appointment) => {
@@ -180,6 +297,9 @@ export default function AppointmentsTable({
 }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [staffOffice, setStaffOffice] = useState(null);
+  const [staffId, setStaffId] = useState(null);
+  const [staffServices, setStaffServices] = useState([]);
+  const [assignedServiceTasks, setAssignedServiceTasks] = useState([]);
   const [accessLoading, setAccessLoading] = useState(true);
 
   // Internal search state.
@@ -235,6 +355,7 @@ export default function AppointmentsTable({
     currentUser?.email?.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase();
 
   // Load administrator or staff access from Firebase.
+  // Staff access includes their office, assigned services, and assigned service tasks.
   useEffect(() => {
     let active = true;
     let requestId = 0;
@@ -246,6 +367,9 @@ export default function AppointmentsTable({
 
       setCurrentUser(user);
       setStaffOffice(null);
+      setStaffId(null);
+      setStaffServices([]);
+      setAssignedServiceTasks([]);
       setAccessLoading(true);
 
       if (!user) {
@@ -253,7 +377,11 @@ export default function AppointmentsTable({
         return;
       }
 
-      if (user.email?.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+      const userEmail = String(user.email || '')
+        .trim()
+        .toLowerCase();
+
+      if (userEmail === ADMIN_EMAIL.toLowerCase()) {
         setAccessLoading(false);
         return;
       }
@@ -270,17 +398,73 @@ export default function AppointmentsTable({
           return;
         }
 
-        if (!staffSnapshot.empty) {
-          const staffData = staffSnapshot.docs[0].data();
-
-          const assignedOffice = String(staffData.office || '')
-            .trim()
-            .toUpperCase();
-
-          if (assignedOffice) {
-            setStaffOffice(assignedOffice);
-          }
+        if (staffSnapshot.empty) {
+          setAccessLoading(false);
+          return;
         }
+
+        const staffDocument = staffSnapshot.docs[0];
+        const staffData = staffDocument.data();
+
+        const assignedOffice = String(staffData.office || '')
+          .trim()
+          .toUpperCase();
+
+        const assignedServices = getStaffServices(staffData);
+
+        setStaffId(staffDocument.id);
+        setStaffServices(assignedServices);
+
+        if (assignedOffice) {
+          setStaffOffice(assignedOffice);
+        }
+
+        // Retrieve service tasks assigned directly to this staff member.
+        // These records identify which individual services belong to the staff member.
+        const serviceTaskQueries = [];
+
+        if (user.uid) {
+          serviceTaskQueries.push(
+            getDocs(
+              query(
+                collection(db, 'appointment_services'),
+                where('assignedStaffId', '==', user.uid)
+              )
+            )
+          );
+        }
+
+        if (user.email) {
+          serviceTaskQueries.push(
+            getDocs(
+              query(
+                collection(db, 'appointment_services'),
+                where('assignedStaffEmail', '==', user.email)
+              )
+            )
+          );
+        }
+
+        const serviceTaskSnapshots = await Promise.all(
+          serviceTaskQueries
+        );
+
+        if (!active || currentRequest !== requestId) {
+          return;
+        }
+
+        const taskMap = new Map();
+
+        serviceTaskSnapshots.forEach((snapshot) => {
+          snapshot.docs.forEach((taskDocument) => {
+            taskMap.set(taskDocument.id, {
+              id: taskDocument.id,
+              ...taskDocument.data()
+            });
+          });
+        });
+
+        setAssignedServiceTasks(Array.from(taskMap.values()));
       } catch (error) {
         console.error('Failed to load staff access:', error);
       } finally {
@@ -310,7 +494,8 @@ export default function AppointmentsTable({
   }, []);
 
   // Administrator can view all appointments.
-  // Staff can only view appointments from their assigned office.
+  // Staff can only view appointments containing their assigned services.
+  // Individual appointment service tasks are separated so staff only see their own tasks.
   const accessibleAppointments = useMemo(() => {
     if (!currentUser) {
       return [];
@@ -324,21 +509,122 @@ export default function AppointmentsTable({
       return appointments;
     }
 
-    if (!staffOffice) {
+    if (!staffOffice || !staffId) {
       return [];
     }
 
-    return appointments.filter((appointment) => {
+    const normalizedEmail = String(currentUser.email || '')
+      .trim()
+      .toLowerCase();
+
+    const staffAssignedTasks = assignedServiceTasks.filter((task) =>
+      isTaskAssignedToStaff(
+        task,
+        currentUser.uid || staffId,
+        normalizedEmail
+      )
+    );
+
+    const tasksByAppointment = new Map();
+
+    staffAssignedTasks.forEach((task) => {
+      const parentId = String(
+        task.parentAppointmentId || task.appointmentId || ''
+      ).trim();
+
+      if (!parentId) return;
+
+      if (!tasksByAppointment.has(parentId)) {
+        tasksByAppointment.set(parentId, []);
+      }
+
+      tasksByAppointment.get(parentId).push(task);
+    });
+
+    const accessible = [];
+
+    appointments.forEach((appointment) => {
       const appointmentOffice = String(appointment?.office || '')
         .trim()
         .toUpperCase();
 
-      return appointmentOffice === staffOffice;
+      if (appointmentOffice !== staffOffice) {
+        return;
+      }
+
+      const appointmentId = String(appointment?.id || '').trim();
+
+      if (!appointmentId) {
+        return;
+      }
+
+      // Find service tasks assigned directly to this staff member.
+      const matchingAssignedTasks =
+        tasksByAppointment.get(appointmentId) || [];
+
+      if (matchingAssignedTasks.length > 0) {
+        // Display only the service tasks assigned to this staff member.
+        matchingAssignedTasks.forEach((task) => {
+          accessible.push({
+            ...appointment,
+            ...task,
+
+            // Keep the parent appointment ID for existing actions.
+            id: appointment.id,
+
+            // Preserve the parent appointment information.
+            userName: task.userName || appointment.userName,
+            userEmail: task.userEmail || appointment.userEmail,
+            userPhoto: task.userPhoto || appointment.userPhoto,
+            office: task.office || appointment.office,
+            appointmentDate:
+              task.appointmentDate || appointment.appointmentDate,
+            appointmentTime:
+              task.appointmentTime || appointment.appointmentTime,
+            queueDate: task.queueDate || appointment.queueDate,
+            queueNumber:
+              task.queueNumber || appointment.queueNumber,
+            createdAt: task.createdAt || appointment.createdAt,
+            approvedAt: task.approvedAt || appointment.approvedAt,
+
+            // Use the individual service task's details.
+            service:
+              task.serviceName ||
+              task.service ||
+              appointment.service,
+            serviceId: task.serviceId || appointment.serviceId,
+
+            // Unique row key when one booking contains multiple services.
+            _displayKey: `${appointment.id}-${task.id}`,
+            _serviceTaskId: task.id
+          });
+        });
+
+        return;
+      }
+
+      // Fallback for appointment records that store their services directly.
+      if (
+        appointmentMatchesStaffServices(
+          appointment,
+          staffServices
+        )
+      ) {
+        accessible.push({
+          ...appointment,
+          _displayKey: appointment.id
+        });
+      }
     });
+
+    return accessible;
   }, [
     currentUser,
     isAdmin,
     staffOffice,
+    staffId,
+    staffServices,
+    assignedServiceTasks,
     filteredAppointments
   ]);
 
@@ -362,6 +648,8 @@ export default function AppointmentsTable({
         appointment?.userName,
         appointment?.userEmail,
         appointment?.service,
+        appointment?.serviceName,
+        appointment?.serviceId,
         appointment?.reason,
         appointment?.queueNumber,
         appointment?.office,
@@ -455,7 +743,7 @@ export default function AppointmentsTable({
           appointment.userEmail || '',
           appointment.office || '',
           bookingMode,
-          appointment.service || '',
+          appointment.service || appointment.serviceName || '',
           appointment.appointmentDate || appointment.queueDate || '',
           appointment.appointmentTime || '',
           appointment.status || 'waiting',
@@ -706,8 +994,8 @@ export default function AppointmentsTable({
     );
   }
 
-  // Staff must have an assigned office.
-  if (!isAdmin && !staffOffice) {
+  // Staff must have an assigned office and staff record.
+  if (!isAdmin && (!staffOffice || !staffId)) {
     return (
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
         <div className="text-center py-16 px-6">
@@ -716,8 +1004,8 @@ export default function AppointmentsTable({
           </p>
 
           <p className="text-sm text-slate-400 mt-1">
-            Your account does not have a valid office assignment in the
-            staff collection.
+            Your account does not have a valid office and staff assignment
+            in the staff collection.
           </p>
         </div>
       </div>
@@ -739,7 +1027,7 @@ export default function AppointmentsTable({
               <p className="text-xs text-slate-500 mt-1">
                 {isAdmin
                   ? 'View and manage student queues across all offices in real-time.'
-                  : `Showing appointments for ${staffOffice} only.`}
+                  : `Showing only appointments for your assigned services in ${staffOffice}.`}
               </p>
             </div>
 
@@ -863,11 +1151,12 @@ export default function AppointmentsTable({
                   const referenceCopied =
                     copiedAction === `${appt.id}-reference`;
 
-                  const isMenuOpen = openActionMenuId === appt.id;
+                  const menuId = appt._displayKey || appt.id;
+                  const isMenuOpen = openActionMenuId === menuId;
 
                   return (
                     <tr
-                      key={appt.id}
+                      key={appt._displayKey || appt.id}
                       className="hover:bg-sky-50/40 transition-colors"
                     >
                       {/* Queue Number */}
@@ -930,7 +1219,7 @@ export default function AppointmentsTable({
 
                       {/* Requested Service */}
                       <td className="px-6 py-4 font-medium text-slate-800">
-                        {appt.service}
+                        {appt.service || appt.serviceName || 'N/A'}
                       </td>
 
                       {/* Appointment Date and Time */}
@@ -986,7 +1275,7 @@ export default function AppointmentsTable({
                           {/* Dropdown Toggle */}
                           <button
                             type="button"
-                            onClick={() => handleToggleActionMenu(appt.id)}
+                            onClick={() => handleToggleActionMenu(menuId)}
                             aria-haspopup="menu"
                             aria-expanded={isMenuOpen}
                             disabled={isDeleting}
@@ -1129,7 +1418,7 @@ export default function AppointmentsTable({
                   >
                     {isAdmin
                       ? 'No appointments match your search.'
-                      : `No ${staffOffice} appointments match your search.`}
+                      : `No appointments for your assigned services in ${staffOffice} match your search.`}
                   </td>
                 </tr>
               )}
@@ -1197,7 +1486,7 @@ export default function AppointmentsTable({
               </p>
 
               <p className="mt-1 text-xs text-slate-500">
-                {qrAppointment.service || ''}
+                {qrAppointment.service || qrAppointment.serviceName || ''}
               </p>
             </div>
 
