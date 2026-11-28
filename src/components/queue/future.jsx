@@ -1,3 +1,4 @@
+
 import {
   CalendarDays,
   Clock3,
@@ -7,6 +8,7 @@ import {
   BadgeCheck,
   AlertCircle,
   Flag,
+  XCircle,
 } from "lucide-react";
 
 const PHILIPPINE_TIME_ZONE = "Asia/Manila";
@@ -284,6 +286,8 @@ export default function Future({
   appointments = [],
   officeName = "SWDS",
   todayKey,
+  onReject,
+  processingId,
 }) {
   const currentDateKey = todayKey || getManilaDateKey();
 
@@ -515,6 +519,23 @@ export default function Future({
                           </p>
                         </div>
                       )}
+
+                      {/* Postpone Appointment */}
+                      <div className="mt-3 pt-3 border-t border-slate-200 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => onReject?.(item)}
+                          disabled={
+                            Boolean(processingId) ||
+                            !onReject
+                          }
+                          className="inline-flex items-center gap-1 text-rose-700 hover:text-rose-800 font-semibold text-xs bg-rose-50 hover:bg-rose-100 px-3 py-2 rounded-lg border border-rose-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Postpone with reason"
+                        >
+                          <XCircle className="w-3.5 h-3.5" />
+                          Postpone
+                        </button>
+                      </div>
                     </div>
                   );
                 })}

@@ -1,3 +1,4 @@
+
 import { useEffect, useState, useRef } from "react";
 import emailjs from "@emailjs/browser";
 
@@ -62,9 +63,12 @@ const getServiceTaskIds = (appointment) => {
  * STAFF ASSIGNMENT CHECKS
  *
  * An appointment is visible only when:
- * 1. Its appointment-level staff assignment matches the logged-in staff; OR
- * 2. It has service-level assignments and EVERY service belongs to
+ * 1. Its appointment-level assignment matches the logged-in staff; AND
+ * 2. If service-level assignments exist, EVERY service belongs to
  *    the logged-in staff member.
+ *
+ * This prevents a parent appointment assignment from overriding
+ * an individual service's staff assignment.
  */
 
 const normalizeStaffValue = (value) =>
@@ -166,21 +170,56 @@ const isAssignedToCurrentStaff = (item, staff) => {
   if (!item || !staff) return false;
 
   const parentAssignment = getStaffAssignmentValues(item);
+  const services = Array.isArray(item.services) ? item.services : [];
 
+  const assignedServices = services.filter(
+    (service) =>
+      service &&
+      typeof service === "object" &&
+      getStaffAssignmentValues(service).hasAssignment
+  );
+
+  // Modern bookings and walk-ins must respect every service assignment.
+  if (assignedServices.length > 0) {
+    if (
+      assignedServices.length !== services.filter(
+        (service) =>
+          service &&
+          typeof service === "object" &&
+          service.serviceTaskId
+      ).length &&
+      services.some(
+        (service) =>
+          service &&
+          typeof service === "object" &&
+          service.serviceTaskId &&
+          !getStaffAssignmentValues(service).hasAssignment
+      )
+    ) {
+      return false;
+    }
+
+    if (
+      !assignedServices.every((service) =>
+        isAssignmentForStaff(service, staff)
+      )
+    ) {
+      return false;
+    }
+
+    if (parentAssignment.hasAssignment) {
+      return isAssignmentForStaff(item, staff);
+    }
+
+    return true;
+  }
+
+  // Legacy records without service-level assignments.
   if (parentAssignment.hasAssignment) {
     return isAssignmentForStaff(item, staff);
   }
 
-  const services = Array.isArray(item.services) ? item.services : [];
-
-  if (!services.length) return false;
-
-  return services.every(
-    (service) =>
-      service &&
-      typeof service === "object" &&
-      isAssignmentForStaff(service, staff)
-  );
+  return false;
 };
 
 const assertStaffOwnsAppointment = (item, staff) => {
@@ -190,7 +229,7 @@ const assertStaffOwnsAppointment = (item, staff) => {
 
   if (!isAssignedToCurrentStaff(item, staff)) {
     throw new Error(
-      "You are not authorized to manage this appointment because it is not assigned to your account."
+      "You are not authorized to manage this appointment because the appointment or one of its services is not assigned to your account."
     );
   }
 };
@@ -344,6 +383,9 @@ const hasValidAppointmentSchedule = (item) => {
 };
 
 const isAheadOfTimeAppointment = (item, currentDateTime) => {
+  // Walk-ins are immediately eligible and do not have booking schedules.
+  if (isWalkInAppointment(item)) return false;
+
   if (!hasValidAppointmentSchedule(item)) return false;
 
   const scheduledDate = getScheduledDate(item);
@@ -356,6 +398,7 @@ const isAheadOfTimeAppointment = (item, currentDateTime) => {
 };
 
 const isAppointmentReadyForAutomaticApproval = (item, currentDateTime) => {
+  if (isWalkInAppointment(item)) return false;
   if (!hasValidAppointmentSchedule(item)) return false;
 
   return !isAheadOfTimeAppointment(item, currentDateTime);
@@ -412,20 +455,6 @@ const requiresCounselingConfirmation = (item) => {
   return selectedServices.some((service) => counselingNames.includes(service));
 };
 
-const assertAutomaticApprovalAllowed = (appointmentData, currentDateTime) => {
-  if (requiresCounselingConfirmation(appointmentData)) {
-    throw new Error(
-      "This appointment includes Guidance and Counseling Services. It must remain pending until staff explicitly accepts it."
-    );
-  }
-
-  if (!isAppointmentReadyForAutomaticApproval(appointmentData, currentDateTime)) {
-    throw new Error(
-      "This appointment is scheduled for a later time and cannot be automatically approved yet."
-    );
-  }
-};
-
 const isWalkInAppointment = (item) => {
   if (!item || typeof item !== "object") return false;
   if (item.isWalkIn === true) return true;
@@ -455,6 +484,26 @@ const isWalkInAppointment = (item) => {
   if (item.registeredBy || item.registeredByEmail) return true;
 
   return false;
+};
+
+const assertAutomaticApprovalAllowed = (appointmentData, currentDateTime) => {
+  if (isWalkInAppointment(appointmentData)) {
+    throw new Error(
+      "Walk-in appointments are registered as approved and must not use automatic booking approval."
+    );
+  }
+
+  if (requiresCounselingConfirmation(appointmentData)) {
+    throw new Error(
+      "This appointment includes Guidance and Counseling Services. It must remain pending until staff explicitly accepts it."
+    );
+  }
+
+  if (!isAppointmentReadyForAutomaticApproval(appointmentData, currentDateTime)) {
+    throw new Error(
+      "This appointment is scheduled for a later time and cannot be automatically approved yet."
+    );
+  }
 };
 
 const getAppointmentEmail = (item) => {
@@ -768,7 +817,8 @@ const getLinkedServiceTaskQueryRefs = async (appointmentId) => {
  * 3. Documents matching appointmentId.
  * 4. Documents matching parentAppointmentId.
  *
- * All transaction.get() calls receive valid DocumentReferences.
+ * Every child task must belong to this appointment, SWDS, and
+ * the currently authenticated staff member.
  */
 const getLinkedServiceTaskSnapshots = async (
   transaction,
@@ -839,6 +889,16 @@ const getLinkedServiceTaskSnapshots = async (
     });
   });
 
+  const expectedTaskIds = getServiceTaskIds(appointmentData);
+
+  expectedTaskIds.forEach((taskId) => {
+    if (!linkedTasks.has(taskId)) {
+      throw new Error(
+        `The service task "${taskId}" linked to this appointment is missing.`
+      );
+    }
+  });
+
   const serviceTasks = [];
 
   linkedTasks.forEach(({ id, ref, data }) => {
@@ -857,7 +917,7 @@ const getLinkedServiceTaskSnapshots = async (
 
     if (!isAssignmentForStaff(data, staff)) {
       throw new Error(
-        `You are not authorized to manage service task "${id}" because it is not assigned to your account.`
+        `You are not authorized to manage service task "${id}" because it is assigned to another staff member or has no valid staff assignment.`
       );
     }
 
@@ -871,6 +931,28 @@ const getLinkedServiceTaskSnapshots = async (
 
     serviceTasks.push({ id, ref, data });
   });
+
+  // Modern bookings and walk-ins must have one child task per service.
+  const embeddedServiceTaskIds = Array.isArray(appointmentData?.services)
+    ? appointmentData.services
+        .filter(
+          (service) =>
+            service &&
+            typeof service === "object" &&
+            service.serviceTaskId
+        )
+        .map((service) => String(service.serviceTaskId).trim())
+        .filter(Boolean)
+    : [];
+
+  if (
+    embeddedServiceTaskIds.length &&
+    embeddedServiceTaskIds.some((id) => !linkedTasks.has(id))
+  ) {
+    throw new Error(
+      "One or more service tasks linked in the appointment's services list are missing."
+    );
+  }
 
   return serviceTasks;
 };
@@ -902,9 +984,22 @@ const buildParentServiceSyncData = (
     }
   });
 
+  const taskUpdatesById = new Map(
+    serviceTasks.map(({ id }) => [id, embeddedUpdates])
+  );
+
   const synchronizedServices = existingServices.map((service) => {
     if (!service || typeof service !== "object" || Array.isArray(service)) {
       return service;
+    }
+
+    const serviceTaskId = service.serviceTaskId;
+
+    if (serviceTaskId && taskUpdatesById.has(serviceTaskId)) {
+      return {
+        ...service,
+        ...taskUpdatesById.get(serviceTaskId),
+      };
     }
 
     return {
@@ -1053,6 +1148,7 @@ export default function useSWDS({
 
   const automaticApprovalAppointments = allPendingAppointments.filter(
     (item) =>
+      !isWalkInAppointment(item) &&
       !requiresCounselingConfirmation(item) &&
       isAppointmentReadyForAutomaticApproval(item, currentDateTime)
   );
@@ -1122,9 +1218,16 @@ export default function useSWDS({
       return;
     }
 
+    if (isWalkInAppointment(item)) {
+      setActionError(
+        "Walk-in appointments are already approved during registration and cannot be accepted again."
+      );
+      return;
+    }
+
     if (!isAssignedToCurrentStaff(item, staff)) {
       setActionError(
-        "You cannot accept this appointment because it is assigned to another staff member."
+        "You cannot accept this appointment because it or one of its services is assigned to another staff member."
       );
       return;
     }
@@ -1251,6 +1354,14 @@ export default function useSWDS({
             ? readTickets(publicData)
             : [];
 
+          const approvedAppointment = {
+            ...appointmentData,
+            id: item.id,
+            queueDate: dateKey,
+            queueHour: hourKey,
+            queuePosition: nextNumber,
+          };
+
           transaction.set(
             publicQueueRef,
             {
@@ -1263,13 +1374,7 @@ export default function useSWDS({
               tickets: [
                 ...withoutTicket(tickets, item.id),
                 publicTicket(
-                  {
-                    ...appointmentData,
-                    id: item.id,
-                    queueDate: dateKey,
-                    queueHour: hourKey,
-                    queuePosition: nextNumber,
-                  },
+                  approvedAppointment,
                   "approved",
                   queueNumber
                 ),
@@ -1375,7 +1480,7 @@ export default function useSWDS({
 
     if (!isAssignedToCurrentStaff(item, staff)) {
       setActionError(
-        "You cannot serve this appointment because it is assigned to another staff member."
+        "You cannot serve this appointment because it or one of its services is assigned to another staff member."
       );
       return;
     }
@@ -1479,7 +1584,15 @@ export default function useSWDS({
             nowServing: data.queueNumber,
             tickets: [
               ...withoutTicket(tickets, item.id),
-              publicTicket({ ...data, id: item.id }, "in-progress"),
+              publicTicket(
+                {
+                  ...data,
+                  id: item.id,
+                  queueDate: dateKey,
+                  queueHour: hourKey,
+                },
+                "in-progress"
+              ),
             ],
             updatedAt: serverTimestamp(),
           },
@@ -1527,7 +1640,7 @@ export default function useSWDS({
 
     if (!isAssignedToCurrentStaff(item, staff)) {
       setActionError(
-        "You cannot complete this appointment because it is assigned to another staff member."
+        "You cannot complete this appointment because it or one of its services is assigned to another staff member."
       );
       return;
     }
@@ -1694,7 +1807,7 @@ export default function useSWDS({
 
     if (!isAssignedToCurrentStaff(appointment, staff)) {
       setActionError(
-        "You cannot reject this appointment because it is assigned to another staff member."
+        "You cannot reject this appointment because it or one of its services is assigned to another staff member."
       );
       return;
     }
@@ -1742,7 +1855,7 @@ export default function useSWDS({
 
     if (!isAssignedToCurrentStaff(appointmentToReject, staff)) {
       setRejectionError(
-        "You cannot reject this appointment because it is assigned to another staff member."
+        "You cannot reject this appointment because it or one of its services is assigned to another staff member."
       );
       return;
     }

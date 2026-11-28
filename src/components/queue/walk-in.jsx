@@ -1,5 +1,4 @@
-
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   UserPlus,
   X,
@@ -12,25 +11,29 @@ import {
   collection,
   runTransaction,
   serverTimestamp,
+  onSnapshot,
 } from "firebase/firestore";
 import { auth, db } from "../../services/firebase";
 
 const SWDS_SERVICES = [
-  "Guidance & Counseling Services",
-  "Services for Students with Special Needs & PWDs",
-  "Psychological & Wellness Services",
-  "Information & Orientation Services",
-  "Economic Enterprise Development",
-  "Career & Placement Services / PESO",
-  "Admission & Recruitment Services",
-  "University Student Council",
-  "Student Organizations",
-  "Multi-Faith Services",
+  { id: "guidance_counseling", name: "Guidance & Counseling Services" },
+  { id: "special_needs_pwd", name: "Services for Students with Special Needs & PWDs" },
+  { id: "psychological_wellness", name: "Psychological & Wellness Services" },
+  { id: "information_orientation", name: "Information & Orientation Services" },
+  { id: "economic_enterprise", name: "Economic Enterprise Development" },
+  { id: "career_placement_peso", name: "Career & Placement Services / PESO" },
+  { id: "admission_recruitment", name: "Admission & Recruitment Services" },
+  { id: "university_student_council", name: "University Student Council" },
+  { id: "student_organizations", name: "Student Organizations" },
+  { id: "multi_faith", name: "Multi-Faith Services" },
+  { id: "others", name: "Others" },
 ];
 
 const OTHER_SERVICE = "Others";
 const OFFICE_NAME = "SWDS";
 const PUBLIC_QUEUE_COLLECTION = "queues";
+const SERVICE_TASKS_COLLECTION = "appointment_services";
+const STAFF_ASSIGNMENTS_COLLECTION = "swds_service_assignments";
 const PHILIPPINE_TIME_ZONE = "Asia/Manila";
 
 // Generate a unique feedback reference for each appointment.
@@ -48,25 +51,47 @@ const generateFeedbackReference = () => {
       .join("");
   }
 
-  // Fallback for environments without crypto.getRandomValues.
   return `${Date.now().toString(16)}${Math.random()
     .toString(16)
-    .slice(2)}${Math.random().toString(16).slice(2)}`;
+    .slice(2)}${Math.random().toString(16).slice(2)}`.slice(0, 48);
 };
 
-// Get the current Philippine calendar date.
-const getManilaDateKey = (date = new Date()) => {
-  const parts = new Intl.DateTimeFormat("en-US", {
+// Get Philippine date and time information.
+const getManilaDateTime = (date = new Date()) => {
+  const dateParts = new Intl.DateTimeFormat("en-US", {
     timeZone: PHILIPPINE_TIME_ZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(date);
 
-  const value = (type) =>
+  const timeParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: PHILIPPINE_TIME_ZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  const value = (parts, type) =>
     parts.find((part) => part.type === type)?.value || "";
 
-  return `${value("year")}-${value("month")}-${value("day")}`;
+  const year = value(dateParts, "year");
+  const month = value(dateParts, "month");
+  const day = value(dateParts, "day");
+  const hour = Number(value(timeParts, "hour"));
+
+  const appointmentTime = new Intl.DateTimeFormat("en-US", {
+    timeZone: PHILIPPINE_TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
+
+  return {
+    dateKey: `${year}-${month}-${day}`,
+    hour,
+    appointmentTime,
+  };
 };
 
 // Supports existing appointment records.
@@ -88,29 +113,98 @@ const getAppointmentQueueDate = (item) => {
             ? new Date(approvedAt)
             : null;
 
-  return date && !Number.isNaN(date.getTime())
-    ? getManilaDateKey(date)
-    : null;
+  if (!date || Number.isNaN(date.getTime())) return null;
+
+  return getManilaDateTime(date).dateKey;
 };
 
-const isTicketForDay = (item, dateKey) =>
-  getAppointmentQueueDate(item) === dateKey;
+const isTicketForCurrentHour = (item, dateKey, hour) => {
+  if (item?.queueDate && item.queueDate !== dateKey) {
+    return false;
+  }
+
+  if (typeof item?.queueHour === "number") {
+    return (
+      getAppointmentQueueDate(item) === dateKey &&
+      item.queueHour === hour
+    );
+  }
+
+  const timestamp =
+    item?.approvedAt ||
+    item?.createdAt ||
+    item?.updatedAt;
+
+  const date =
+    typeof timestamp?.toDate === "function"
+      ? timestamp.toDate()
+      : typeof timestamp?.seconds === "number"
+        ? new Date(timestamp.seconds * 1000)
+        : timestamp instanceof Date
+          ? timestamp
+          : timestamp
+            ? new Date(timestamp)
+            : null;
+
+  return (
+    date &&
+    !Number.isNaN(date.getTime()) &&
+    getAppointmentQueueDate(item) === dateKey &&
+    getManilaDateTime(date).hour === hour
+  );
+};
 
 const readTickets = (data) =>
   Array.isArray(data?.tickets) ? data.tickets : [];
 
-const withoutTicket = (tickets, appointmentId) =>
-  tickets.filter(
-    (ticket) => ticket.appointmentId !== appointmentId
-  );
+const getQueueNumberValue = (value) => {
+  const match = String(value || "").match(/^SWDS-?(\d+)$/i);
+  return match ? Number(match[1]) : 0;
+};
 
-const publicTicket = (item, status, queueNumber) => ({
+const publicTicket = (item) => ({
   appointmentId: item.id,
-  queueNumber: String(queueNumber || item.queueNumber || ""),
-  status,
+  serviceTaskId: item.serviceTaskId,
+  serviceId: item.serviceId,
+  serviceName: item.serviceName,
+  assignedStaffId: item.assignedStaffId,
+  assignedStaffEmail: item.assignedStaffEmail,
+  assignedStaffName: item.assignedStaffName,
+  queueNumber: String(item.queueNumber || ""),
+  status: item.status,
   isPriority: item.isPriority === true,
   queuePosition: Number(item.queuePosition || 0),
+  queueDate: item.queueDate,
+  queueHour: item.queueHour,
+  services: item.services || [],
 });
+
+const normalizeEmail = (email) =>
+  String(email || "").trim().toLowerCase();
+
+const isAssignmentForStaff = (assignment, staff) => {
+  if (!assignment || !staff) return false;
+
+  const assignedStaffId = String(
+    assignment.staffId || ""
+  ).trim();
+
+  const assignedStaffEmail = normalizeEmail(
+    assignment.staffEmail
+  );
+
+  const currentStaffId = String(staff.uid || "").trim();
+  const currentStaffEmail = normalizeEmail(staff.email);
+
+  return (
+    (!!assignedStaffId &&
+      !!currentStaffId &&
+      assignedStaffId === currentStaffId) ||
+    (!!assignedStaffEmail &&
+      !!currentStaffEmail &&
+      assignedStaffEmail === currentStaffEmail)
+  );
+};
 
 export default function WalkIn({
   appointments = [],
@@ -129,6 +223,82 @@ export default function WalkIn({
   const [walkInError, setWalkInError] = useState("");
   const [walkInSuccess, setWalkInSuccess] = useState("");
 
+  const [serviceAssignments, setServiceAssignments] = useState({});
+  const [assignmentsLoading, setAssignmentsLoading] = useState(true);
+  const [assignmentErrorState, setAssignmentErrorState] = useState("");
+
+  const staff = auth.currentUser;
+
+  // Derive session-related values instead of setting state synchronously
+  // inside the effect.
+  const assignmentError = !staff
+    ? "Your session has expired. Please log in again."
+    : assignmentErrorState;
+
+  // Listen to the current SWDS staff-service assignments.
+  useEffect(() => {
+    if (!staff) return;
+
+    const assignmentRef = doc(
+      db,
+      STAFF_ASSIGNMENTS_COLLECTION,
+      "current"
+    );
+
+    const unsubscribe = onSnapshot(
+      assignmentRef,
+      (snapshot) => {
+        if (!snapshot.exists()) {
+          setServiceAssignments({});
+          setAssignmentErrorState(
+            "SWDS staff-service assignments have not been configured."
+          );
+          setAssignmentsLoading(false);
+          return;
+        }
+
+        const data = snapshot.data();
+
+        setServiceAssignments(
+          data?.assignments && typeof data.assignments === "object"
+            ? data.assignments
+            : {}
+        );
+
+        setAssignmentErrorState("");
+        setAssignmentsLoading(false);
+      },
+      (error) => {
+        console.error(
+          "Failed to load SWDS service assignments:",
+          error
+        );
+
+        setServiceAssignments({});
+        setAssignmentErrorState(
+          "Unable to load staff-service assignments. Please try again."
+        );
+        setAssignmentsLoading(false);
+      }
+    );
+
+    return unsubscribe;
+  }, [staff?.uid, staff?.email]);
+
+  const getServiceAssignment = (serviceId) =>
+    serviceAssignments?.[serviceId] || null;
+
+  const isServiceAssignedToCurrentStaff = (serviceId) =>
+    isAssignmentForStaff(
+      getServiceAssignment(serviceId),
+      auth.currentUser
+    );
+
+  const getAvailableServices = () =>
+    SWDS_SERVICES.filter((service) =>
+      isServiceAssignedToCurrentStaff(service.id)
+    );
+
   const clearWalkInMessages = () => {
     setWalkInError("");
     setWalkInSuccess("");
@@ -142,6 +312,20 @@ export default function WalkIn({
 
   // Multiple service selection, including Others.
   const handleWalkInServiceToggle = (service) => {
+    const serviceConfig = SWDS_SERVICES.find(
+      (item) => item.name === service
+    );
+
+    if (
+      !serviceConfig ||
+      !isServiceAssignedToCurrentStaff(serviceConfig.id)
+    ) {
+      setWalkInError(
+        "You can only register services assigned to your staff account."
+      );
+      return;
+    }
+
     setWalkInServices((previous) =>
       previous.includes(service)
         ? previous.filter((item) => item !== service)
@@ -157,7 +341,8 @@ export default function WalkIn({
     }
   };
 
-  // Register a walk-in and immediately assign a queue number.
+  // Register a walk-in using the same staff-service assignment
+  // and Firestore structure as regular appointments.
   const handleRegisterWalkIn = async (event) => {
     event.preventDefault();
 
@@ -166,16 +351,13 @@ export default function WalkIn({
     const name = walkInName.trim();
     const email = walkInEmail.trim().toLowerCase();
 
-    const selectedServices = [
+    const selectedServiceNames = [
       ...new Set(
-        walkInServices
-          .filter(
-            (service) =>
-              typeof service === "string" &&
-              service !== OTHER_SERVICE
-          )
-          .map((service) => service.trim())
-          .filter(Boolean)
+        walkInServices.filter(
+          (service) =>
+            typeof service === "string" &&
+            service !== OTHER_SERVICE
+        )
       ),
     ];
 
@@ -189,13 +371,12 @@ export default function WalkIn({
         return;
       }
 
-      selectedServices.push(`Others: ${customService}`);
+      selectedServiceNames.push(OTHER_SERVICE);
     }
 
-    const services = [...new Set(selectedServices)];
     const reason = walkInReason.trim();
 
-    if (!name || !email || services.length === 0) {
+    if (!name || !email || selectedServiceNames.length === 0) {
       setWalkInError(
         "Student name, email address, and at least one service are required."
       );
@@ -218,7 +399,13 @@ export default function WalkIn({
 
     if (
       name.length > 120 ||
-      services.some((service) => service.length > 150) ||
+      selectedServiceNames.some(
+        (service) =>
+          (service === OTHER_SERVICE
+            ? customService
+            : service
+          ).length > 150
+      ) ||
       reason.length > 500
     ) {
       setWalkInError(
@@ -227,11 +414,92 @@ export default function WalkIn({
       return;
     }
 
-    const staff = auth.currentUser;
+    const currentStaff = auth.currentUser;
 
-    if (!staff) {
+    if (!currentStaff) {
       setWalkInError(
         "Your session has expired. Please log in again."
+      );
+      return;
+    }
+
+    if (assignmentsLoading) {
+      setWalkInError(
+        "Please wait while your staff-service assignments load."
+      );
+      return;
+    }
+
+    if (assignmentError) {
+      setWalkInError(assignmentError);
+      return;
+    }
+
+    // Resolve every selected service to its current staff assignment.
+    const selectedServices = selectedServiceNames.map(
+      (serviceName) => {
+        const config = SWDS_SERVICES.find(
+          (item) => item.name === serviceName
+        );
+
+        if (!config) {
+          throw new Error(
+            `Invalid SWDS service selected: ${serviceName}`
+          );
+        }
+
+        const assignment = getServiceAssignment(config.id);
+
+        if (
+          !assignment ||
+          !isAssignmentForStaff(assignment, currentStaff)
+        ) {
+          throw new Error(
+            `You are not assigned to ${serviceName}. Please select only your assigned services.`
+          );
+        }
+
+        return {
+          serviceId: config.id,
+          serviceName:
+            config.id === "others"
+              ? `Others: ${customService}`
+              : config.name,
+          assignedStaffId: assignment.staffId || currentStaff.uid,
+          assignedStaffEmail:
+            assignment.staffEmail || currentStaff.email || "",
+          assignedStaffName:
+            assignment.staffName ||
+            currentStaff.displayName ||
+            currentStaff.email ||
+            "SWDS Staff",
+        };
+      }
+    );
+
+    // All selected services must belong to the same staff member.
+    const assignedStaffIds = [
+      ...new Set(
+        selectedServices.map((service) =>
+          String(service.assignedStaffId || "")
+        )
+      ),
+    ];
+
+    const assignedStaffEmails = [
+      ...new Set(
+        selectedServices.map((service) =>
+          normalizeEmail(service.assignedStaffEmail)
+        )
+      ),
+    ];
+
+    if (
+      assignedStaffIds.length > 1 ||
+      assignedStaffEmails.length > 1
+    ) {
+      setWalkInError(
+        "Selected services must belong to the same assigned staff member. Register services assigned to another staff member separately."
       );
       return;
     }
@@ -240,13 +508,11 @@ export default function WalkIn({
     clearWalkInMessages();
 
     try {
-      const appointmentRef = doc(
-        collection(db, "appointments")
+      const assignmentRef = doc(
+        db,
+        STAFF_ASSIGNMENTS_COLLECTION,
+        "current"
       );
-
-      // Generate the reference before the transaction.
-      // Firestore transaction retries will reuse the same reference.
-      const feedbackReference = generateFeedbackReference();
 
       const counterRef = doc(
         db,
@@ -260,139 +526,326 @@ export default function WalkIn({
         officeName
       );
 
-      const queueNumber = await runTransaction(
+      // Each selected service gets its own appointment and task.
+      // This gives every separate service its own queue number.
+      const appointmentRefs = selectedServices.map(() =>
+        doc(collection(db, "appointments"))
+      );
+
+      const serviceTaskRefs = selectedServices.map(() =>
+        doc(collection(db, SERVICE_TASKS_COLLECTION))
+      );
+
+      const feedbackReferences = selectedServices.map(() =>
+        generateFeedbackReference()
+      );
+
+      const queueNumbers = await runTransaction(
         db,
         async (transaction) => {
+          // Read all documents before performing transaction writes.
+          const assignmentSnapshot =
+            await transaction.get(assignmentRef);
+
           const counterSnapshot =
             await transaction.get(counterRef);
 
           const publicSnapshot =
             await transaction.get(publicQueueRef);
 
-          const dateKey = getManilaDateKey();
+          if (!assignmentSnapshot.exists()) {
+            throw new Error(
+              "SWDS staff-service assignments are unavailable."
+            );
+          }
+
+          const currentAssignments =
+            assignmentSnapshot.data()?.assignments || {};
+
+          // Revalidate every service assignment inside the transaction.
+          const verifiedServices = selectedServices.map(
+            (service) => {
+              const assignment =
+                currentAssignments[service.serviceId];
+
+              if (
+                !assignment ||
+                !isAssignmentForStaff(
+                  assignment,
+                  currentStaff
+                )
+              ) {
+                throw new Error(
+                  `The assignment for ${service.serviceName} has changed. Refresh the page and try again.`
+                );
+              }
+
+              return {
+                ...service,
+                assignedStaffId:
+                  assignment.staffId || currentStaff.uid,
+                assignedStaffEmail:
+                  assignment.staffEmail ||
+                  currentStaff.email ||
+                  "",
+                assignedStaffName:
+                  assignment.staffName ||
+                  currentStaff.displayName ||
+                  currentStaff.email ||
+                  "SWDS Staff",
+              };
+            }
+          );
+
+          const dateTime = getManilaDateTime();
+          const dateKey = dateTime.dateKey;
+          const queueHour = dateTime.hour;
 
           const counterData = counterSnapshot.exists()
             ? counterSnapshot.data()
             : {};
 
-          const lastNumber =
-            counterData.queueDate === dateKey
-              ? Number(counterData.lastNumber || 0)
-              : 0;
-
-          // Include existing appointments when determining
-          // the highest queue number for the current day.
-          const highestToday = Math.max(
-            0,
-            ...appointments
-              .filter((item) =>
-                String(item?.office || "")
-                  .trim()
-                  .toLowerCase() === officeName.toLowerCase()
-              )
-              .filter((item) =>
-                isTicketForDay(item, dateKey)
-              )
-              .map((item) => {
-                const match = String(
-                  item.queueNumber || ""
-                ).match(/^SWDS-?(\d+)$/i);
-
-                return match ? Number(match[1]) : 0;
-              })
-          );
-
-          const nextNumber =
-            Math.max(lastNumber, highestToday) + 1;
-
-          const number = `SWDS-${String(
-            nextNumber
-          ).padStart(3, "0")}`;
-
-          const walkIn = {
-            office: officeName,
-
-            userName: name,
-            userEmail: email,
-
-            services,
-            service: services.join(", "),
-
-            reason,
-
-            status: "approved",
-
-            source: "walk-in",
-            bookingType: "walk-in",
-            isWalkIn: true,
-
-            // Required for personalized feedback links.
-            feedbackReference,
-
-            isPriority: walkInPriority,
-
-            queueNumber: number,
-            queuePosition: nextNumber,
-            queueDate: dateKey,
-
-            createdAt: serverTimestamp(),
-            approvedAt: serverTimestamp(),
-
-            approvedBy: staff.uid,
-            approvedByEmail: staff.email || "",
-
-            registeredBy: staff.uid,
-            registeredByEmail: staff.email || "",
-          };
-
           const publicData = publicSnapshot.exists()
             ? publicSnapshot.data()
             : {};
 
-          const sameDay =
-            publicData.queueDate === dateKey;
+          const sameHour =
+            counterData.queueDate === dateKey &&
+            Number(counterData.queueHour) === queueHour;
 
-          const tickets = sameDay
+          const lastCounterNumber = sameHour
+            ? Number(counterData.lastNumber || 0)
+            : 0;
+
+          const samePublicHour =
+            publicData.queueDate === dateKey &&
+            Number(publicData.queueHour) === queueHour;
+
+          const existingTickets = samePublicHour
             ? readTickets(publicData)
             : [];
+
+          const highestAppointmentNumber = Math.max(
+            0,
+            ...appointments
+              .filter(
+                (item) =>
+                  String(item?.office || "")
+                    .trim()
+                    .toLowerCase() === officeName.toLowerCase()
+              )
+              .filter((item) =>
+                isTicketForCurrentHour(
+                  item,
+                  dateKey,
+                  queueHour
+                )
+              )
+              .map((item) =>
+                getQueueNumberValue(item.queueNumber)
+              )
+          );
+
+          const highestPublicTicketNumber = Math.max(
+            0,
+            ...existingTickets.map((ticket) =>
+              getQueueNumberValue(ticket.queueNumber)
+            )
+          );
+
+          let nextNumber = Math.max(
+            lastCounterNumber,
+            highestAppointmentNumber,
+            highestPublicTicketNumber
+          );
+
+          const createdTickets = [];
+          const assignedQueueNumbers = [];
+
+          verifiedServices.forEach((service, index) => {
+            nextNumber += 1;
+
+            const queueNumber = `SWDS-${String(
+              nextNumber
+            ).padStart(3, "0")}`;
+
+            const appointmentRef = appointmentRefs[index];
+            const serviceTaskRef = serviceTaskRefs[index];
+            const feedbackReference =
+              feedbackReferences[index];
+
+            const serviceEntry = {
+              serviceId: service.serviceId,
+              serviceName: service.serviceName,
+              serviceTaskId: serviceTaskRef.id,
+              assignedStaffId: service.assignedStaffId,
+              assignedStaffEmail:
+                service.assignedStaffEmail,
+              assignedStaffName:
+                service.assignedStaffName,
+              queueNumber,
+              status: "approved",
+            };
+
+            const appointment = {
+              office: officeName,
+
+              userName: name,
+              userEmail: email,
+
+              userId: null,
+              userPhoto: "",
+
+              appointmentDate: dateKey,
+              appointmentTime: dateTime.appointmentTime,
+
+              service: service.serviceName,
+              services: [serviceEntry],
+              reason: reason || service.serviceName,
+
+              serviceTaskIds: [serviceTaskRef.id],
+
+              assignedStaffId: service.assignedStaffId,
+              assignedStaffEmail:
+                service.assignedStaffEmail,
+              assignedStaffName:
+                service.assignedStaffName,
+
+              totalServices: 1,
+              pendingServices: 1,
+              completedServices: 0,
+
+              status: "approved",
+
+              source: "walk-in",
+              bookingType: "walk-in",
+              isWalkIn: true,
+
+              feedbackReference,
+
+              isPriority: walkInPriority,
+              priorityImageUrl: null,
+
+              queueNumber,
+              queuePosition: nextNumber,
+              queueDate: dateKey,
+              queueHour,
+
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+              approvedAt: serverTimestamp(),
+
+              approvedBy: currentStaff.uid,
+              approvedByEmail: currentStaff.email || "",
+
+              registeredBy: currentStaff.uid,
+              registeredByEmail:
+                currentStaff.email || "",
+            };
+
+            const serviceTask = {
+              appointmentId: appointmentRef.id,
+              parentAppointmentId: appointmentRef.id,
+
+              office: officeName,
+
+              userId: null,
+              userName: name,
+              userEmail: email,
+              userPhoto: "",
+
+              appointmentDate: dateKey,
+              appointmentTime: dateTime.appointmentTime,
+
+              serviceId: service.serviceId,
+              serviceName: service.serviceName,
+
+              assignedStaffId: service.assignedStaffId,
+              assignedStaffEmail:
+                service.assignedStaffEmail,
+              assignedStaffName:
+                service.assignedStaffName,
+
+              bookingSlotId: null,
+
+              reason: reason || service.serviceName,
+
+              isPriority: walkInPriority,
+              priorityImageUrl: null,
+
+              queueNumber,
+              queuePosition: nextNumber,
+              queueDate: dateKey,
+              queueHour,
+
+              serviceTaskIndex: 0,
+              status: "approved",
+
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            };
+
+            transaction.set(
+              appointmentRef,
+              appointment
+            );
+
+            transaction.set(
+              serviceTaskRef,
+              serviceTask
+            );
+
+            createdTickets.push(
+              publicTicket({
+                id: appointmentRef.id,
+                serviceTaskId: serviceTaskRef.id,
+                serviceId: service.serviceId,
+                serviceName: service.serviceName,
+                assignedStaffId:
+                  service.assignedStaffId,
+                assignedStaffEmail:
+                  service.assignedStaffEmail,
+                assignedStaffName:
+                  service.assignedStaffName,
+                queueNumber,
+                status: "approved",
+                isPriority: walkInPriority,
+                queuePosition: nextNumber,
+                queueDate: dateKey,
+                queueHour,
+                services: [serviceEntry],
+              })
+            );
+
+            assignedQueueNumbers.push(queueNumber);
+          });
 
           transaction.set(
             counterRef,
             {
               office: officeName,
               queueDate: dateKey,
+              queueHour,
               lastNumber: nextNumber,
               updatedAt: serverTimestamp(),
             },
             { merge: true }
           );
 
-          // Save the feedback reference in the appointment document.
-          transaction.set(appointmentRef, walkIn);
-
           transaction.set(
             publicQueueRef,
             {
               office: officeName,
               queueDate: dateKey,
+              queueHour,
 
-              nowServing: sameDay
+              nowServing: samePublicHour
                 ? publicData.nowServing || ""
                 : "",
 
               tickets: [
-                ...withoutTicket(
-                  tickets,
-                  appointmentRef.id
-                ),
-                publicTicket(
-                  {
-                    ...walkIn,
-                    id: appointmentRef.id,
-                  },
-                  "approved",
-                  number
-                ),
+                ...existingTickets,
+                ...createdTickets,
               ],
 
               updatedAt: serverTimestamp(),
@@ -400,7 +853,7 @@ export default function WalkIn({
             { merge: true }
           );
 
-          return number;
+          return assignedQueueNumbers;
         }
       );
 
@@ -415,7 +868,9 @@ export default function WalkIn({
       setWalkInError("");
 
       setWalkInSuccess(
-        `Walk-in registered successfully. Queue number ${queueNumber} assigned.`
+        queueNumbers.length === 1
+          ? `Walk-in registered successfully. Queue number ${queueNumbers[0]} assigned.`
+          : `Walk-in registered successfully. Queue numbers ${queueNumbers.join(", ")} assigned. Each service has its own appointment.`
       );
     } catch (error) {
       console.error("Failed to register walk-in:", error);
@@ -595,52 +1050,85 @@ export default function WalkIn({
                 </div>
 
                 <p className="mb-3 text-xs text-slate-500">
-                  Select all services requested by the student. Choose Others if the requested service is not listed.
+                  Only services assigned to your staff account are available. Services assigned to another staff member cannot be selected.
                 </p>
 
-                <div className="max-h-64 space-y-2 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  {[...SWDS_SERVICES, OTHER_SERVICE].map(
-                    (service) => {
-                      const selected =
-                        walkInServices.includes(service);
+                {assignmentsLoading && (
+                  <div className="mb-3 flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs font-medium text-blue-700">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading your assigned SWDS services...
+                  </div>
+                )}
 
-                      return (
-                        <label
-                          key={service}
-                          className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                {assignmentError && (
+                  <p
+                    role="alert"
+                    className="mb-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs font-medium text-rose-700"
+                  >
+                    {assignmentError}
+                  </p>
+                )}
+
+                {!assignmentsLoading &&
+                  !assignmentError &&
+                  getAvailableServices().length === 0 && (
+                    <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs font-medium text-amber-800">
+                      No SWDS services are currently assigned to your staff account.
+                    </p>
+                  )}
+
+                <div className="max-h-64 space-y-2 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  {SWDS_SERVICES.map((serviceConfig) => {
+                    const service = serviceConfig.name;
+                    const selected =
+                      walkInServices.includes(service);
+
+                    const assigned =
+                      isServiceAssignedToCurrentStaff(
+                        serviceConfig.id
+                      );
+
+                    const disabled =
+                      walkInSaving ||
+                      assignmentsLoading ||
+                      !assigned;
+
+                    return (
+                      <label
+                        key={serviceConfig.id}
+                        className={`flex items-start gap-3 rounded-lg border p-3 transition-colors ${
+                          disabled
+                            ? "cursor-not-allowed border-slate-200 bg-slate-100 opacity-50"
+                            : selected
+                              ? "cursor-pointer border-blue-300 bg-blue-50"
+                              : "cursor-pointer border-slate-200 bg-white hover:bg-slate-50"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() =>
+                            handleWalkInServiceToggle(service)
+                          }
+                          disabled={disabled}
+                          className="sr-only"
+                        />
+
+                        <span
+                          className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${
                             selected
-                              ? "border-blue-300 bg-blue-50"
-                              : "border-slate-200 bg-white hover:bg-slate-50"
-                          } ${
-                            walkInSaving
-                              ? "cursor-not-allowed opacity-60"
-                              : ""
+                              ? "border-blue-600 bg-blue-600 text-white"
+                              : "border-slate-300 bg-white"
                           }`}
                         >
-                          <input
-                            type="checkbox"
-                            checked={selected}
-                            onChange={() =>
-                              handleWalkInServiceToggle(service)
-                            }
-                            disabled={walkInSaving}
-                            className="sr-only"
-                          />
+                          {selected && (
+                            <Check className="h-3.5 w-3.5" />
+                          )}
+                        </span>
 
+                        <span className="flex-1">
                           <span
-                            className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${
-                              selected
-                                ? "border-blue-600 bg-blue-600 text-white"
-                                : "border-slate-300 bg-white"
-                            }`}
-                          >
-                            {selected && (
-                              <Check className="h-3.5 w-3.5" />
-                            )}
-                          </span>
-
-                          <span
-                            className={`text-sm leading-relaxed ${
+                            className={`block text-sm leading-relaxed ${
                               selected
                                 ? "font-semibold text-blue-800"
                                 : "text-slate-700"
@@ -648,10 +1136,17 @@ export default function WalkIn({
                           >
                             {service}
                           </span>
-                        </label>
-                      );
-                    }
-                  )}
+
+                          {!assigned &&
+                            !assignmentsLoading && (
+                              <span className="mt-1 block text-[11px] text-slate-400">
+                                Assigned to another staff member
+                              </span>
+                            )}
+                        </span>
+                      </label>
+                    );
+                  })}
                 </div>
 
                 {/* Custom Others service */}
@@ -796,9 +1291,23 @@ export default function WalkIn({
                 type="submit"
                 disabled={
                   walkInSaving ||
+                  assignmentsLoading ||
+                  !!assignmentError ||
                   !walkInName.trim() ||
                   !walkInEmail.trim() ||
                   walkInServices.length === 0 ||
+                  walkInServices.some((service) => {
+                    const config = SWDS_SERVICES.find(
+                      (item) => item.name === service
+                    );
+
+                    return (
+                      !config ||
+                      !isServiceAssignedToCurrentStaff(
+                        config.id
+                      )
+                    );
+                  }) ||
                   (
                     walkInServices.includes(OTHER_SERVICE) &&
                     !walkInOtherService.trim()
