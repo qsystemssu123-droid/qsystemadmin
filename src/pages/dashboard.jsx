@@ -31,6 +31,27 @@ import DashboardLoading from '../components/dashboard/DashboardLoading.jsx';
 
 const PHILIPPINE_TIME_ZONE = 'Asia/Manila';
 
+const SWDS_STAFF = [
+  {
+    id: 'ZV3oQjx0sEUXxSgoTPasttBR8mj2',
+    email: 'staff.ssu.glenn@gmail.com',
+    name: 'Sir Glenn',
+    label: 'Staff 1'
+  },
+  {
+    id: 'PZ8FXHKb96M3iLr2CqG28QnPmXf1',
+    email: 'staff.ssu.chenyl@gmail.com',
+    name: 'Chenyl M. Maasin',
+    label: 'Staff 2'
+  },
+  {
+    id: 'xjOMBJQiQBc2Skk2d1iAdchxOOi2',
+    email: 'staff.ssu.patricia@gmail.com',
+    name: 'Patricia Paula G. Gonzales',
+    label: 'Staff 3'
+  }
+];
+
 // Normalize appointment status values.
 const normalizeStatus = (status) =>
   String(status || '')
@@ -41,6 +62,12 @@ const normalizeStatus = (status) =>
 // Normalize queue number strings consistently.
 const normalizeQueueNumber = (value) =>
   String(value || '').trim();
+
+// Normalize staff identifiers and names.
+const normalizeStaffValue = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase();
 
 // Get the current Philippine date and time.
 const getManilaDateTime = () => {
@@ -361,12 +388,123 @@ const normalizePublicTicket = (ticket) => {
   };
 };
 
+// Get the parent appointment ID from a service task.
+const getServiceTaskAppointmentId = (task) =>
+  task?.appointmentId ||
+  task?.parentAppointmentId ||
+  task?.parentId ||
+  '';
+
+// Find the service task belonging to a public queue ticket.
+const findServiceTaskForTicket = (
+  ticket,
+  serviceTasks,
+  appointment
+) => {
+  if (!ticket) return null;
+
+  const taskId =
+    ticket.serviceTaskId ||
+    ticket.taskId ||
+    ticket.appointmentServiceId ||
+    '';
+
+  if (taskId) {
+    const exactTask = serviceTasks.find(
+      (task) => task.id === taskId
+    );
+
+    if (exactTask) return exactTask;
+  }
+
+  const ticketQueueNumber = normalizeQueueNumber(
+    ticket.queueNumber
+  );
+
+  if (ticketQueueNumber) {
+    const queueTask = serviceTasks.find(
+      (task) =>
+        normalizeQueueNumber(task.queueNumber) ===
+          ticketQueueNumber ||
+        normalizeQueueNumber(task.ticketNumber) ===
+          ticketQueueNumber
+    );
+
+    if (queueTask) return queueTask;
+  }
+
+  const appointmentId =
+    ticket.appointmentId ||
+    ticket.id ||
+    appointment?.id ||
+    '';
+
+  if (!appointmentId) return null;
+
+  const appointmentTasks = serviceTasks.filter(
+    (task) =>
+      getServiceTaskAppointmentId(task) === appointmentId
+  );
+
+  // Only use appointment-level matching when the appointment
+  // has exactly one service task. Never guess between multiple tasks.
+  if (appointmentTasks.length === 1) {
+    return appointmentTasks[0];
+  }
+
+  return null;
+};
+
+// Check whether a ticket belongs to the selected staff member.
+const belongsToStaff = (ticket, staff) => {
+  if (!ticket || !staff) return false;
+
+  const assignedStaffId = normalizeStaffValue(
+    ticket.assignedStaffId ||
+      ticket.staffId ||
+      ''
+  );
+
+  const assignedStaffEmail = normalizeStaffValue(
+    ticket.assignedStaffEmail ||
+      ticket.staffEmail ||
+      ''
+  );
+
+  const assignedStaffName = normalizeStaffValue(
+    ticket.assignedStaffName ||
+      ticket.staffName ||
+      ''
+  );
+
+  return (
+    assignedStaffId === normalizeStaffValue(staff.id) ||
+    assignedStaffEmail === normalizeStaffValue(staff.email) ||
+    (
+      assignedStaffName !== '' &&
+      (
+        assignedStaffName === normalizeStaffValue(staff.name) ||
+        assignedStaffName === normalizeStaffValue('Glenn') &&
+          staff.id === SWDS_STAFF[0].id
+      )
+    )
+  );
+};
+
 // Live SWDS Queue Monitor Component.
 function SWDSQueueMonitor() {
   const [queueAppointments, setQueueAppointments] = useState([]);
+  const [serviceTasks, setServiceTasks] = useState([]);
   const [publicQueue, setPublicQueue] = useState(null);
 
+  const [selectedStaffId, setSelectedStaffId] = useState(
+    SWDS_STAFF[0].id
+  );
+
   const [appointmentsLoading, setAppointmentsLoading] =
+    useState(true);
+
+  const [serviceTasksLoading, setServiceTasksLoading] =
     useState(true);
 
   const [publicQueueLoading, setPublicQueueLoading] =
@@ -375,12 +513,20 @@ function SWDSQueueMonitor() {
   const [appointmentsError, setAppointmentsError] =
     useState('');
 
+  const [serviceTasksError, setServiceTasksError] =
+    useState('');
+
   const [publicQueueError, setPublicQueueError] =
     useState('');
 
   const [currentDateTime, setCurrentDateTime] = useState(
     () => getManilaDateTime()
   );
+
+  const selectedStaff =
+    SWDS_STAFF.find(
+      (staff) => staff.id === selectedStaffId
+    ) || SWDS_STAFF[0];
 
   // Keep the monitor synchronized with Philippine time.
   // This only refreshes the display; it does not approve appointments.
@@ -439,6 +585,43 @@ function SWDSQueueMonitor() {
       }
     );
 
+    // Listen to SWDS appointment service tasks.
+    // These contain the individual staff assignments.
+    const serviceTasksRef = collection(
+      db,
+      'appointment_services'
+    );
+
+    const unsubscribeServiceTasks = onSnapshot(
+      serviceTasksRef,
+      (snapshot) => {
+        const tasks = snapshot.docs.map(
+          (document) => ({
+            ...document.data(),
+            id: document.id
+          })
+        );
+
+        setServiceTasks(tasks);
+        setServiceTasksError('');
+        setServiceTasksLoading(false);
+      },
+      (error) => {
+        console.error(
+          'SWDS Service Tasks Monitor Error:',
+          error
+        );
+
+        setServiceTasksError(
+          `Unable to load staff service assignments: ${
+            error?.message || 'Unknown Firestore error'
+          }`
+        );
+
+        setServiceTasksLoading(false);
+      }
+    );
+
     // Listen to the authoritative public SWDS queue.
     const publicQueueRef = doc(
       db,
@@ -476,15 +659,20 @@ function SWDSQueueMonitor() {
 
     return () => {
       unsubscribeAppointments();
+      unsubscribeServiceTasks();
       unsubscribePublicQueue();
     };
   }, []);
 
   const queueLoading =
-    appointmentsLoading || publicQueueLoading;
+    appointmentsLoading ||
+    serviceTasksLoading ||
+    publicQueueLoading;
 
   const queueError =
-    appointmentsError || publicQueueError;
+    appointmentsError ||
+    serviceTasksError ||
+    publicQueueError;
 
   // The public queue is valid for the current Philippine date.
   // queueHour is metadata and must not hide already allocated tickets.
@@ -496,7 +684,7 @@ function SWDSQueueMonitor() {
     publicQueue?.queueDate === currentDateTime.date;
 
   // Only read tickets from today's public SWDS queue.
-  const publicTickets =
+  const allPublicTickets =
     hasPublicTicketsArray && publicQueueIsCurrentHour
       ? publicQueue.tickets
           .map(normalizePublicTicket)
@@ -533,18 +721,27 @@ function SWDSQueueMonitor() {
     );
   };
 
-  // Combine ticket information with its appointment.
+  // Combine ticket, service task, and appointment information.
   // Public ticket fields override stale appointment fields.
   const enrichTicket = (ticket) => {
     const appointment = findAppointmentForTicket(ticket);
 
+    const serviceTask = findServiceTaskForTicket(
+      ticket,
+      serviceTasks,
+      appointment
+    );
+
     return {
       ...(appointment || {}),
+      ...(serviceTask || {}),
       ...ticket,
 
       userName:
         ticket.userName ||
         ticket.studentName ||
+        serviceTask?.userName ||
+        serviceTask?.studentName ||
         appointment?.userName ||
         appointment?.studentName ||
         '',
@@ -552,6 +749,8 @@ function SWDSQueueMonitor() {
       service:
         ticket.service ||
         ticket.serviceName ||
+        serviceTask?.service ||
+        serviceTask?.serviceName ||
         appointment?.service ||
         appointment?.serviceName ||
         '',
@@ -559,8 +758,49 @@ function SWDSQueueMonitor() {
       reason:
         ticket.reason ||
         ticket.visitReason ||
+        serviceTask?.reason ||
+        serviceTask?.visitReason ||
         appointment?.reason ||
         appointment?.visitReason ||
+        '',
+
+      assignedStaffId:
+        ticket.assignedStaffId ||
+        ticket.staffId ||
+        serviceTask?.assignedStaffId ||
+        serviceTask?.staffId ||
+        appointment?.assignedStaffId ||
+        appointment?.staffId ||
+        '',
+
+      assignedStaffName:
+        ticket.assignedStaffName ||
+        ticket.staffName ||
+        serviceTask?.assignedStaffName ||
+        serviceTask?.staffName ||
+        appointment?.assignedStaffName ||
+        appointment?.staffName ||
+        '',
+
+      assignedStaffEmail:
+        ticket.assignedStaffEmail ||
+        ticket.staffEmail ||
+        serviceTask?.assignedStaffEmail ||
+        serviceTask?.staffEmail ||
+        appointment?.assignedStaffEmail ||
+        appointment?.staffEmail ||
+        '',
+
+      serviceTaskId:
+        ticket.serviceTaskId ||
+        ticket.taskId ||
+        serviceTask?.id ||
+        '',
+
+      serviceId:
+        ticket.serviceId ||
+        serviceTask?.serviceId ||
+        appointment?.serviceId ||
         '',
 
       queueNumber: normalizeQueueNumber(
@@ -570,7 +810,9 @@ function SWDSQueueMonitor() {
       isPriority:
         typeof ticket.isPriority === 'boolean'
           ? ticket.isPriority
-          : Boolean(appointment?.isPriority)
+          : typeof serviceTask?.isPriority === 'boolean'
+            ? serviceTask.isPriority
+            : Boolean(appointment?.isPriority)
     };
   };
 
@@ -591,6 +833,17 @@ function SWDSQueueMonitor() {
       );
     });
 
+  // Enrich all public tickets with their individual service assignments.
+  const enrichedPublicTickets = allPublicTickets.map(
+    enrichTicket
+  );
+
+  // Only show tickets assigned to the selected staff member.
+  const publicTickets = enrichedPublicTickets.filter(
+    (ticket) =>
+      belongsToStaff(ticket, selectedStaff)
+  );
+
   // Read the authoritative nowServing value from queues/SWDS.
   const publicNowServing =
     publicQueueIsCurrentHour
@@ -599,7 +852,7 @@ function SWDSQueueMonitor() {
         )
       : '';
 
-  // Find the corresponding public ticket.
+  // Find the corresponding public ticket for this staff member.
   const publicServingTicket = publicNowServing
     ? publicTickets.find(
         (ticket) =>
@@ -611,47 +864,46 @@ function SWDSQueueMonitor() {
 
   // Find the corresponding appointment for additional details.
   // Appointment records only enrich the public ticket.
-  const publicServingAppointment = publicNowServing
+  const publicServingAppointment = publicServingTicket
     ? eligibleCurrentHourAppointments.find(
         (appointment) =>
           normalizeQueueNumber(appointment.queueNumber) ===
             publicNowServing
       ) ||
-      findAppointmentForTicket({
-        queueNumber: publicNowServing
-      })
+      findAppointmentForTicket(publicServingTicket)
     : null;
 
-  // queues/SWDS.nowServing is the only authority for the
-  // currently serving queue number.
-  const currentServing = publicNowServing
+  // queues/SWDS.nowServing remains the office-wide authority.
+  // A staff tab only displays it when the serving ticket belongs
+  // to the currently selected staff member.
+  const currentServing = publicServingTicket
     ? {
         ...(publicServingAppointment || {}),
-        ...(publicServingTicket || {}),
+        ...publicServingTicket,
 
         userName:
-          publicServingTicket?.userName ||
-          publicServingTicket?.studentName ||
+          publicServingTicket.userName ||
+          publicServingTicket.studentName ||
           publicServingAppointment?.userName ||
           publicServingAppointment?.studentName ||
           '',
 
         service:
-          publicServingTicket?.service ||
-          publicServingTicket?.serviceName ||
+          publicServingTicket.service ||
+          publicServingTicket.serviceName ||
           publicServingAppointment?.service ||
           publicServingAppointment?.serviceName ||
           '',
 
         reason:
-          publicServingTicket?.reason ||
-          publicServingTicket?.visitReason ||
+          publicServingTicket.reason ||
+          publicServingTicket.visitReason ||
           publicServingAppointment?.reason ||
           publicServingAppointment?.visitReason ||
           '',
 
         isPriority:
-          typeof publicServingTicket?.isPriority === 'boolean'
+          typeof publicServingTicket.isPriority === 'boolean'
             ? publicServingTicket.isPriority
             : Boolean(publicServingAppointment?.isPriority),
 
@@ -663,9 +915,8 @@ function SWDSQueueMonitor() {
     currentServing?.queueNumber || ''
   );
 
-  // Only public tickets can become waiting queue entries.
-  // Stale appointment and child-service statuses cannot hide
-  // a valid public ticket.
+  // Only public tickets assigned to this staff member can become
+  // waiting queue entries.
   const publicWaiting = publicTickets
     .filter((ticket) => {
       const ticketQueueNum = normalizeQueueNumber(
@@ -679,8 +930,7 @@ function SWDSQueueMonitor() {
         !isServing(ticket.status) &&
         !isInactiveTicket(ticket.status)
       );
-    })
-    .map(enrichTicket);
+    });
 
   // The public queue is the source of truth for allocated tickets.
   // Never create a queue entry from an appointment alone.
@@ -797,6 +1047,78 @@ function SWDSQueueMonitor() {
         </div>
       </div>
 
+      {/* Staff Navigation */}
+      <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-6">
+        {SWDS_STAFF.map((staff, index) => {
+          const isActive = selectedStaffId === staff.id;
+
+          const staffTicketCount = enrichedPublicTickets.filter(
+            (ticket) => belongsToStaff(ticket, staff)
+          ).length;
+
+          return (
+            <button
+              key={staff.id}
+              type="button"
+              onClick={() => setSelectedStaffId(staff.id)}
+              aria-pressed={isActive}
+              className={`relative min-w-0 rounded-xl border px-2 py-3 sm:px-4 sm:py-4 text-center transition-all duration-200 ${
+                isActive
+                  ? 'bg-blue-600 border-blue-600 text-white shadow-md shadow-blue-100'
+                  : 'bg-white border-slate-200 text-slate-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700'
+              }`}
+            >
+              <span
+                className={`block text-[10px] sm:text-xs font-bold uppercase tracking-wider ${
+                  isActive ? 'text-blue-100' : 'text-slate-400'
+                }`}
+              >
+                Staff {index + 1}
+              </span>
+
+              <span className="block mt-1 text-xs sm:text-sm font-bold truncate">
+                {staff.name}
+              </span>
+
+              <span
+                className={`inline-flex items-center justify-center mt-2 min-w-6 h-5 px-2 rounded-full text-[10px] font-bold ${
+                  isActive
+                    ? 'bg-white/20 text-white'
+                    : 'bg-slate-100 text-slate-600'
+                }`}
+              >
+                {staffTicketCount}
+              </span>
+
+              {isActive && (
+                <span className="absolute -bottom-px left-1/2 -translate-x-1/2 w-8 h-1 rounded-t-full bg-white"></span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Selected Staff Information */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-6 p-4 rounded-xl border border-blue-100 bg-blue-50/70">
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-blue-600">
+            Selected Staff
+          </p>
+
+          <p className="text-sm font-bold text-slate-800 mt-1">
+            {selectedStaff.name}
+          </p>
+
+          <p className="text-xs text-slate-500 mt-1 break-all">
+            {selectedStaff.email}
+          </p>
+        </div>
+
+        <div className="self-start sm:self-auto px-3 py-1.5 rounded-lg bg-white border border-blue-100 text-xs font-bold text-blue-700">
+          {selectedStaff.label}
+        </div>
+      </div>
+
       {queueLoading ? (
         <div className="py-16 flex flex-col items-center justify-center gap-3">
           <div className="w-8 h-8 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin"></div>
@@ -815,6 +1137,10 @@ function SWDSQueueMonitor() {
             >
               {appointmentsError && (
                 <p>{appointmentsError}</p>
+              )}
+
+              {serviceTasksError && (
+                <p>{serviceTasksError}</p>
               )}
 
               {publicQueueError && (
@@ -865,7 +1191,7 @@ function SWDSQueueMonitor() {
                 </>
               ) : (
                 <p className="text-sm text-slate-500 mt-4">
-                  No appointment is currently being served.
+                  No appointment is currently being served by this staff member.
                 </p>
               )}
             </div>
@@ -909,7 +1235,7 @@ function SWDSQueueMonitor() {
                 </>
               ) : (
                 <p className="text-sm text-slate-500 mt-4">
-                  No upcoming accepted appointments.
+                  No upcoming accepted appointments for this staff member.
                 </p>
               )}
             </div>
@@ -956,7 +1282,7 @@ function SWDSQueueMonitor() {
             <div className="mt-6 rounded-xl border border-slate-200 p-4">
               <h3 className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
                 <ListOrdered className="w-4 h-4 text-blue-600" />
-                Upcoming Queue
+                Upcoming Queue - {selectedStaff.label}
               </h3>
 
               <div className="space-y-2 max-h-72 overflow-y-auto">
@@ -992,6 +1318,20 @@ function SWDSQueueMonitor() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {waitingAppointments.length === 0 && !currentServing && (
+            <div className="mt-6 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 p-6 text-center">
+              <ListOrdered className="w-7 h-7 text-slate-300 mx-auto mb-2" />
+
+              <p className="text-sm font-semibold text-slate-600">
+                No queue activity for {selectedStaff.label}.
+              </p>
+
+              <p className="text-xs text-slate-400 mt-1">
+                New tickets assigned to this staff member will appear here.
+              </p>
             </div>
           )}
         </>
