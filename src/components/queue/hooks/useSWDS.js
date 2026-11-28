@@ -5,7 +5,6 @@ import emailjs from "@emailjs/browser";
 import {
   collection,
   doc,
-  getDoc,
   getDocs,
   query,
   where,
@@ -20,9 +19,6 @@ const PUBLIC_QUEUE_COLLECTION = "queues";
 const SERVICE_TASKS_COLLECTION = "appointment_services";
 const PHILIPPINE_TIME_ZONE = "Asia/Manila";
 
-// Set to true ONLY after the scheduled Cloud Function is deployed
-// and confirmed to be automatically approving appointments correctly.
-// Keep false until then to preserve client-side auto-approval.
 const CLOUD_AUTO_APPROVAL_ENABLED = true;
 
 const COUNSELING_SERVICES = [
@@ -61,14 +57,6 @@ const getServiceTaskIds = (appointment) => {
 
 /*
  * STAFF ASSIGNMENT CHECKS
- *
- * An appointment is visible only when:
- * 1. Its appointment-level assignment matches the logged-in staff; AND
- * 2. If service-level assignments exist, EVERY service belongs to
- *    the logged-in staff member.
- *
- * This prevents a parent appointment assignment from overriding
- * an individual service's staff assignment.
  */
 
 const normalizeStaffValue = (value) =>
@@ -179,15 +167,15 @@ const isAssignedToCurrentStaff = (item, staff) => {
       getStaffAssignmentValues(service).hasAssignment
   );
 
-  // Modern bookings and walk-ins must respect every service assignment.
   if (assignedServices.length > 0) {
     if (
-      assignedServices.length !== services.filter(
-        (service) =>
-          service &&
-          typeof service === "object" &&
-          service.serviceTaskId
-      ).length &&
+      assignedServices.length !==
+        services.filter(
+          (service) =>
+            service &&
+            typeof service === "object" &&
+            service.serviceTaskId
+        ).length &&
       services.some(
         (service) =>
           service &&
@@ -214,7 +202,6 @@ const isAssignedToCurrentStaff = (item, staff) => {
     return true;
   }
 
-  // Legacy records without service-level assignments.
   if (parentAssignment.hasAssignment) {
     return isAssignmentForStaff(item, staff);
   }
@@ -383,9 +370,7 @@ const hasValidAppointmentSchedule = (item) => {
 };
 
 const isAheadOfTimeAppointment = (item, currentDateTime) => {
-  // Walk-ins are immediately eligible and do not have booking schedules.
   if (isWalkInAppointment(item)) return false;
-
   if (!hasValidAppointmentSchedule(item)) return false;
 
   const scheduledDate = getScheduledDate(item);
@@ -730,6 +715,39 @@ const readTickets = (data) =>
 const withoutTicket = (tickets, appointmentId) =>
   tickets.filter((ticket) => ticket.appointmentId !== appointmentId);
 
+/*
+ * VALIDATES THE PUBLIC NOW-SERVING VALUE.
+ *
+ * A nowServing value is valid only when a matching public ticket exists
+ * and that ticket is actually marked as serving.
+ *
+ * This prevents an old value such as SWDS-001 from remaining active
+ * when the actual public queue only contains an approved SWDS-003.
+ */
+const getValidNowServing = (publicData, tickets = readTickets(publicData)) => {
+  const nowServing = String(publicData?.nowServing || "").trim();
+
+  if (!nowServing) return "";
+
+  const servingTicket = tickets.find((ticket) => {
+    if (!ticket || typeof ticket !== "object") return false;
+
+    const ticketQueueNumber = String(ticket.queueNumber || "").trim();
+
+    const ticketStatus = String(ticket.status || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+
+    return (
+      ticketQueueNumber === nowServing &&
+      ["in-progress", "serving", "now-serving"].includes(ticketStatus)
+    );
+  });
+
+  return servingTicket ? nowServing : "";
+};
+
 const getStatus = (item) =>
   String(item?.status || "pending")
     .trim()
@@ -762,11 +780,25 @@ const getTimestamp = (item) => {
 };
 
 /*
- * FETCH CHILD SERVICE REFERENCES BEFORE THE TRANSACTION.
+ * MATCHES A PUBLIC QUEUE TO THE APPOINTMENT'S ORIGINAL QUEUE SLOT.
  *
- * Firestore Web SDK Transaction.get() accepts DocumentReference,
- * not Query. Therefore, queries must be executed with getDocs()
- * before the transaction starts.
+ * Do not compare against the current clock here. An appointment can
+ * finish after its queue hour has changed.
+ */
+const isSameAppointmentQueue = (publicData, appointmentData) => {
+  const appointmentDate = getAppointmentQueueDate(appointmentData);
+  const appointmentHour = getAppointmentQueueHour(appointmentData);
+
+  if (!appointmentDate || appointmentHour === null) return false;
+
+  return (
+    publicData?.queueDate === appointmentDate &&
+    Number(publicData?.queueHour) === appointmentHour
+  );
+};
+
+/*
+ * FETCH CHILD SERVICE REFERENCES BEFORE THE TRANSACTION.
  */
 const getLinkedServiceTaskQueryRefs = async (appointmentId) => {
   if (typeof appointmentId !== "string" || !appointmentId.trim()) {
@@ -810,15 +842,6 @@ const getLinkedServiceTaskQueryRefs = async (appointmentId) => {
 
 /*
  * FINDS EVERY CHILD SERVICE DOCUMENT CONNECTED TO THIS APPOINTMENT.
- *
- * It checks:
- * 1. IDs saved in appointments.serviceTaskIds.
- * 2. IDs saved in appointments.services[].serviceTaskId.
- * 3. Documents matching appointmentId.
- * 4. Documents matching parentAppointmentId.
- *
- * Every child task must belong to this appointment, SWDS, and
- * the currently authenticated staff member.
  */
 const getLinkedServiceTaskSnapshots = async (
   transaction,
@@ -932,7 +955,6 @@ const getLinkedServiceTaskSnapshots = async (
     serviceTasks.push({ id, ref, data });
   });
 
-  // Modern bookings and walk-ins must have one child task per service.
   const embeddedServiceTaskIds = Array.isArray(appointmentData?.services)
     ? appointmentData.services
         .filter(
@@ -959,13 +981,6 @@ const getLinkedServiceTaskSnapshots = async (
 
 /*
  * BUILDS THE PARENT APPOINTMENT SYNCHRONIZATION DATA.
- *
- * IMPORTANT:
- * Firestore serverTimestamp() sentinels are NOT supported inside arrays.
- * Embedded service objects are stored inside the parent's services array.
- * Convert timestamp fields to regular Date values for those embedded objects.
- *
- * Top-level document fields continue using serverTimestamp().
  */
 const buildParentServiceSyncData = (
   appointmentData,
@@ -1026,12 +1041,6 @@ const buildParentServiceSyncData = (
 
 /*
  * UPDATES EVERY LINKED CHILD TASK AND THE PARENT'S EMBEDDED SERVICES.
- *
- * Call this only after all linked task documents have been read inside
- * the active transaction.
- *
- * Parent and child document timestamp fields remain serverTimestamp().
- * Only timestamp values inside the embedded services array use Date.
  */
 const synchronizeServiceTaskWrites = (
   transaction,
@@ -1058,7 +1067,6 @@ const synchronizeServiceTaskWrites = (
 
 export default function useSWDS({
   appointments = [],
-  completeAppointment,
 }) {
   const officeName = OFFICE_NAME;
 
@@ -1102,10 +1110,6 @@ export default function useSWDS({
 
   const currentQueueHour = currentDateTime.hour;
 
-  /*
-   * FIRST FILTER BY OFFICE.
-   * THEN FILTER BY THE CURRENTLY AUTHENTICATED STAFF MEMBER.
-   */
   const allOfficeAppointments = (appointments || []).filter((item) =>
     belongsToOffice(item, officeName)
   );
@@ -1354,6 +1358,15 @@ export default function useSWDS({
             ? readTickets(publicData)
             : [];
 
+          /*
+           * FIX:
+           * Preserve nowServing only if it matches a ticket that is
+           * genuinely marked as serving. Stale values are cleared.
+           */
+          const validNowServing = sameHourPublicQueue
+            ? getValidNowServing(publicData, tickets)
+            : "";
+
           const approvedAppointment = {
             ...appointmentData,
             id: item.id,
@@ -1368,9 +1381,7 @@ export default function useSWDS({
               office: officeName,
               queueDate: dateKey,
               queueHour: hourKey,
-              nowServing: sameHourPublicQueue
-                ? publicData.nowServing || ""
-                : "",
+              nowServing: validNowServing,
               tickets: [
                 ...withoutTicket(tickets, item.id),
                 publicTicket(
@@ -1384,12 +1395,6 @@ export default function useSWDS({
             { merge: true }
           );
 
-          /*
-           * SYNCHRONIZE PARENT + EMBEDDED SERVICES + CHILD TASKS.
-           *
-           * Embedded services receive Date values for timestamp fields.
-           * Top-level parent and child fields retain serverTimestamp().
-           */
           const approvalUpdates = {
             status: "approved",
             queueNumber,
@@ -1419,13 +1424,6 @@ export default function useSWDS({
       );
     } catch (error) {
       console.error("Failed to accept appointment:", error);
-
-      /*
-       * Do not remove failed automatic attempts from the Set.
-       * Otherwise, the useEffect immediately retries the same failed
-       * transaction whenever the appointments or hook state changes.
-       * This prevents repeated failures and staff UI blinking.
-       */
       setActionError(error?.message || "Failed to accept appointment.");
     } finally {
       setProcessingId(null);
@@ -1433,10 +1431,7 @@ export default function useSWDS({
   };
 
   useEffect(() => {
-    // Cloud Function handles auto-approval when this switch is enabled.
-    // This prevents the client from issuing duplicate approvals.
     if (CLOUD_AUTO_APPROVAL_ENABLED) return;
-
     if (processingId) return;
     if (!currentStaffUid) return;
 
@@ -1446,7 +1441,6 @@ export default function useSWDS({
 
     if (!nextAppointment) return;
 
-    // Mark before starting the async transaction to prevent duplicate calls.
     autoApprovalAttempted.current.add(nextAppointment.id);
 
     handleAcceptAppointment(nextAppointment, {
@@ -1563,17 +1557,25 @@ export default function useSWDS({
           publicData.queueDate === dateKey &&
           Number(publicData.queueHour) === hourKey;
 
-        if (
-          sameHourPublicQueue &&
-          publicData.nowServing &&
-          publicData.nowServing !== data.queueNumber
-        ) {
-          throw new Error("Another ticket is currently being served.");
-        }
-
         const tickets = sameHourPublicQueue
           ? readTickets(publicData)
           : [];
+
+        /*
+         * FIX:
+         * Do not block serving because of a stale nowServing value.
+         * Only a matching ticket with an active serving status counts.
+         */
+        const validNowServing = sameHourPublicQueue
+          ? getValidNowServing(publicData, tickets)
+          : "";
+
+        if (
+          validNowServing &&
+          validNowServing !== String(data.queueNumber).trim()
+        ) {
+          throw new Error("Another ticket is currently being served.");
+        }
 
         transaction.set(
           publicQueueRef,
@@ -1599,9 +1601,6 @@ export default function useSWDS({
           { merge: true }
         );
 
-        /*
-         * SYNCHRONIZE PARENT + EMBEDDED SERVICES + CHILD TASKS.
-         */
         const servingUpdates = {
           status: "in-progress",
           servingAt: serverTimestamp(),
@@ -1628,179 +1627,223 @@ export default function useSWDS({
     }
   };
 
-  const handleCompleteAppointment = async (item) => {
-    if (processingId) return;
+  /*
+   * COMPLETION WORKFLOW
+   *
+   * The public queue is cleaned using the completed appointment's
+   * saved queueDate, queueHour, and queueNumber.
+   *
+   * It no longer compares the queue against the current clock.
+   * This prevents an old hourly queue from keeping a stale nowServing.
+   */
+    const handleCompleteAppointment = async (item) => {
+      if (processingId) return;
 
-    const staff = auth.currentUser;
+      const staff = auth.currentUser;
 
-    if (!staff) {
-      setActionError("Your session has expired. Please log in again.");
-      return;
-    }
-
-    if (!isAssignedToCurrentStaff(item, staff)) {
-      setActionError(
-        "You cannot complete this appointment because it or one of its services is assigned to another staff member."
-      );
-      return;
-    }
-
-    setProcessingId(item.id);
-    clearMessages();
-
-    try {
-      if (typeof completeAppointment !== "function") {
-        throw new Error("The completion handler is unavailable.");
+      if (!staff) {
+        setActionError("Your session has expired. Please log in again.");
+        return;
       }
 
-      const appointmentRef = doc(db, "appointments", item.id);
-      const appointmentSnapshot = await getDoc(appointmentRef);
-
-      if (!appointmentSnapshot.exists()) {
-        throw new Error("The appointment could not be found.");
+      if (!isAssignedToCurrentStaff(item, staff)) {
+        setActionError(
+          "You cannot complete this appointment because it or one of its services is assigned to another staff member."
+        );
+        return;
       }
 
-      const latestAppointmentData = appointmentSnapshot.data();
+      setProcessingId(item.id);
+      clearMessages();
 
-      if (!belongsToOffice(latestAppointmentData, officeName)) {
-        throw new Error("This appointment does not belong to SWDS.");
-      }
+      try {
+        const appointmentRef = doc(db, "appointments", item.id);
 
-      assertStaffOwnsAppointment(latestAppointmentData, staff);
+        const queriedServiceTaskRefs =
+          await getLinkedServiceTaskQueryRefs(item.id);
 
-      /*
-       * Fetch linked service references before completing the parent.
-       * The actual child documents are read again inside the transaction.
-       */
-      const queriedServiceTaskRefs =
-        await getLinkedServiceTaskQueryRefs(item.id);
+        /*
+        * COMPLETE THE PARENT APPOINTMENT AND ALL LINKED CHILD TASKS
+        * IN ONE TRANSACTION.
+        *
+        * Do not call completeAppointment(item.id) here.
+        * That callback performs a separate completion write and can
+        * trigger Firestore permission errors before this transaction.
+        */
+        await runTransaction(db, async (transaction) => {
+          const latestSnapshot = await transaction.get(appointmentRef);
 
-      /*
-       * Preserve the existing completion handler.
-       */
-      await completeAppointment(item.id);
+          if (!latestSnapshot.exists()) {
+            throw new Error("The appointment could not be found.");
+          }
 
-      /*
-       * Synchronize the parent and every linked child service task.
-       */
-      await runTransaction(db, async (transaction) => {
-        const latestSnapshot = await transaction.get(appointmentRef);
+          const latestData = latestSnapshot.data();
 
-        if (!latestSnapshot.exists()) {
-          throw new Error("The appointment could not be found.");
-        }
+          if (!belongsToOffice(latestData, officeName)) {
+            throw new Error("This appointment does not belong to SWDS.");
+          }
 
-        const latestData = latestSnapshot.data();
+          assertStaffOwnsAppointment(latestData, staff);
 
-        if (!belongsToOffice(latestData, officeName)) {
-          throw new Error("This appointment does not belong to SWDS.");
-        }
+          if (getStatus(latestData) === "completed") {
+            throw new Error("This appointment has already been completed.");
+          }
 
-        assertStaffOwnsAppointment(latestData, staff);
-
-        const serviceTaskSnapshots =
-          await getLinkedServiceTaskSnapshots(
-            transaction,
-            latestData,
-            item.id,
-            staff,
-            queriedServiceTaskRefs,
-            [
+          if (
+            ![
               "in-progress",
               "serving",
               "now-serving",
-              "completed",
-            ]
-          );
-
-        const completionUpdates = {
-          status: "completed",
-          completedAt: serverTimestamp(),
-          completedBy: staff.uid,
-          completedByEmail: staff.email || "",
-          updatedAt: serverTimestamp(),
-        };
-
-        synchronizeServiceTaskWrites(
-          transaction,
-          appointmentRef,
-          latestData,
-          serviceTaskSnapshots,
-          completionUpdates
-        );
-      });
-
-      const publicQueueRef = doc(
-        db,
-        PUBLIC_QUEUE_COLLECTION,
-        officeName
-      );
-
-      await runTransaction(db, async (transaction) => {
-        const publicSnapshot = await transaction.get(publicQueueRef);
-        const publicData = publicSnapshot.data() || {};
-        const currentDateTime = getManilaDateTime();
-
-        const sameHour =
-          publicData.queueDate === currentDateTime.date &&
-          Number(publicData.queueHour) === currentDateTime.hour;
-
-        const existingTickets = readTickets(publicData);
-
-        const matchingServingTicket = existingTickets.some(
-          (ticket) =>
-            ticket.appointmentId === item.id &&
-            ticket.queueNumber === publicData.nowServing
-        );
-
-        transaction.set(
-          publicQueueRef,
-          {
-            office: officeName,
-            nowServing:
-              sameHour && matchingServingTicket
-                ? ""
-                : publicData.nowServing || "",
-            tickets: withoutTicket(existingTickets, item.id),
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
-      });
-
-      let emailMessage = "";
-
-      if (isWalkInAppointment(item)) {
-        try {
-          const emailResult = await sendWalkInCompletionEmail(
-            item,
-            officeName
-          );
-
-          if (emailResult.sent) {
-            emailMessage =
-              ` A completion email was successfully sent to ${emailResult.email}.`;
+            ].includes(getStatus(latestData))
+          ) {
+            throw new Error(
+              "Only an appointment currently being served can be completed."
+            );
           }
-        } catch (emailError) {
-          console.error("Walk-in completion email failed:", emailError);
 
-          emailMessage =
-            ` However, the completion email failed: ${
-              emailError?.message || "Unknown email error"
-            }`;
+          const serviceTaskSnapshots =
+            await getLinkedServiceTaskSnapshots(
+              transaction,
+              latestData,
+              item.id,
+              staff,
+              queriedServiceTaskRefs,
+              [
+                "in-progress",
+                "serving",
+                "now-serving",
+              ]
+            );
+
+          const completionUpdates = {
+            status: "completed",
+            completedAt: serverTimestamp(),
+            completedBy: staff.uid,
+            completedByEmail: staff.email || "",
+            updatedAt: serverTimestamp(),
+          };
+
+          synchronizeServiceTaskWrites(
+            transaction,
+            appointmentRef,
+            latestData,
+            serviceTaskSnapshots,
+            completionUpdates
+          );
+        });
+
+        /*
+        * CLEAN THE PUBLIC QUEUE USING THE APPOINTMENT'S ORIGINAL
+        * QUEUE DATE AND HOUR, NOT THE CURRENT DATE AND HOUR.
+        */
+        const publicQueueRef = doc(
+          db,
+          PUBLIC_QUEUE_COLLECTION,
+          officeName
+        );
+
+        await runTransaction(db, async (transaction) => {
+          const [completedAppointmentSnapshot, publicSnapshot] =
+            await Promise.all([
+              transaction.get(appointmentRef),
+              transaction.get(publicQueueRef),
+            ]);
+
+          if (!completedAppointmentSnapshot.exists()) {
+            throw new Error("The completed appointment could not be found.");
+          }
+
+          const completedData = completedAppointmentSnapshot.data();
+
+          if (getStatus(completedData) !== "completed") {
+            throw new Error(
+              "The appointment has not been marked as completed."
+            );
+          }
+
+          if (!belongsToOffice(completedData, officeName)) {
+            throw new Error("This appointment does not belong to SWDS.");
+          }
+
+          const publicData = publicSnapshot.data() || {};
+          const existingTickets = readTickets(publicData);
+
+          const completedQueueNumber = String(
+            completedData.queueNumber || item.queueNumber || ""
+          ).trim();
+
+          const sameQueue = isSameAppointmentQueue(
+            publicData,
+            completedData
+          );
+
+          const isCurrentlyServing =
+            sameQueue &&
+            completedQueueNumber &&
+            String(publicData.nowServing || "").trim() ===
+              completedQueueNumber;
+
+          const remainingTickets = withoutTicket(
+            existingTickets,
+            item.id
+          );
+
+          /*
+          * Clear nowServing if the completed ticket was serving.
+          * Otherwise, retain it only if a remaining ticket confirms
+          * that it is genuinely being served.
+          */
+          const nextNowServing = sameQueue
+            ? isCurrentlyServing
+              ? ""
+              : getValidNowServing(publicData, remainingTickets)
+            : publicData.nowServing || "";
+
+          transaction.set(
+            publicQueueRef,
+            {
+              office: officeName,
+              nowServing: nextNowServing,
+              tickets: remainingTickets,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        });
+
+        let emailMessage = "";
+
+        if (isWalkInAppointment(item)) {
+          try {
+            const emailResult = await sendWalkInCompletionEmail(
+              item,
+              officeName
+            );
+
+            if (emailResult.sent) {
+              emailMessage =
+                ` A completion email was successfully sent to ${emailResult.email}.`;
+            }
+          } catch (emailError) {
+            console.error("Walk-in completion email failed:", emailError);
+
+            emailMessage =
+              ` However, the completion email failed: ${
+                emailError?.message || "Unknown email error"
+              }`;
+          }
         }
-      }
 
-      setActionSuccess(
-        `Appointment ${item.queueNumber || ""} completed successfully.${emailMessage}`
-      );
-    } catch (error) {
-      console.error("Failed to complete appointment:", error);
-      setActionError(error?.message || "Failed to complete appointment.");
-    } finally {
-      setProcessingId(null);
-    }
-  };
+        setActionSuccess(
+          `Appointment ${item.queueNumber || ""} completed successfully.${emailMessage}`
+        );
+      } catch (error) {
+        console.error("Failed to complete appointment:", error);
+        setActionError(error?.message || "Failed to complete appointment.");
+      } finally {
+        setProcessingId(null);
+      }
+    };
 
   const openRejectModal = (appointment) => {
     const staff = auth.currentUser;
@@ -1933,10 +1976,6 @@ export default function useSWDS({
           updatedAt: serverTimestamp(),
         };
 
-        /*
-         * Synchronize parent, embedded service entries, and child tasks.
-         * Embedded array timestamps are converted to Date values.
-         */
         synchronizeServiceTaskWrites(
           transaction,
           appointmentRef,
@@ -1957,25 +1996,50 @@ export default function useSWDS({
           ),
         });
 
+        /*
+         * Use the rejected appointment's original queue slot.
+         * Do not use today's date alone to decide whether to clear
+         * the currently serving ticket.
+         */
         const publicData = publicSnapshot.data() || {};
         const publicTickets = readTickets(publicData);
 
-        const matchingServingTicket = publicTickets.some(
-          (ticket) =>
-            ticket.appointmentId === appointmentId &&
-            ticket.queueNumber === publicData.nowServing
+        const rejectedQueueNumber = String(
+          appointmentData.queueNumber || ""
+        ).trim();
+
+        const sameQueue = isSameAppointmentQueue(
+          publicData,
+          appointmentData
         );
+
+        const isCurrentlyServing =
+          sameQueue &&
+          rejectedQueueNumber &&
+          String(publicData.nowServing || "").trim() ===
+            rejectedQueueNumber;
+
+        const remainingTickets = withoutTicket(
+          publicTickets,
+          appointmentId
+        );
+
+        /*
+         * Preserve a serving value only when a remaining public ticket
+         * confirms that it is actually being served.
+         */
+        const nextNowServing = sameQueue
+          ? isCurrentlyServing
+            ? ""
+            : getValidNowServing(publicData, remainingTickets)
+          : publicData.nowServing || "";
 
         transaction.set(
           publicQueueRef,
           {
             office: officeName,
-            nowServing:
-              publicData.queueDate === getManilaDateKey() &&
-              matchingServingTicket
-                ? ""
-                : publicData.nowServing || "",
-            tickets: withoutTicket(publicTickets, appointmentId),
+            nowServing: nextNowServing,
+            tickets: remainingTickets,
             updatedAt: serverTimestamp(),
           },
           { merge: true }

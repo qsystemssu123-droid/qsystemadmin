@@ -1,3 +1,4 @@
+
 import { useEffect, useMemo, useState } from 'react';
 import {
   Search,
@@ -24,8 +25,9 @@ import {
   query,
   where,
   getDocs,
-  deleteDoc,
-  doc
+  doc,
+  runTransaction,
+  writeBatch
 } from 'firebase/firestore';
 import { auth, db } from '../../services/firebase.js';
 
@@ -799,7 +801,7 @@ export default function AppointmentsTable({
     );
   };
 
-  // Delete an appointment.
+  // Delete an appointment and all related SWDS queue/service-task records.
   // Only the administrator account is allowed to execute this action.
   const handleDeleteAppointment = async (appointment) => {
     setOpenActionMenuId(null);
@@ -817,10 +819,15 @@ export default function AppointmentsTable({
       return;
     }
 
+    const appointmentId = String(appointment.id).trim();
+    const appointmentOffice = String(appointment.office || '')
+      .trim()
+      .toUpperCase();
+
     const confirmed = window.confirm(
       `Are you sure you want to delete appointment ${
-        appointment.queueNumber || appointment.id
-      } for ${appointment.userName || 'this student'}?`
+        appointment.queueNumber || appointmentId
+      } for ${appointment.userName || 'this student'}?\n\nThis will delete the parent appointment, its related service tasks, and only its related queue tickets. Other queue tickets will remain untouched.`
     );
 
     if (!confirmed) {
@@ -828,19 +835,167 @@ export default function AppointmentsTable({
     }
 
     setActionError('');
-    setDeletingId(appointment.id);
+    setDeletingId(appointmentId);
 
     try {
+      // Find all service-task records belonging to this parent appointment.
+      // Both fields are checked because existing documents may use either one.
+      const serviceTaskQueries = [
+        getDocs(
+          query(
+            collection(db, 'appointment_services'),
+            where('appointmentId', '==', appointmentId)
+          )
+        ),
+        getDocs(
+          query(
+            collection(db, 'appointment_services'),
+            where('parentAppointmentId', '==', appointmentId)
+          )
+        )
+      ];
+
+      const serviceTaskSnapshots = await Promise.all(serviceTaskQueries);
+
+      // Deduplicate service-task documents in case a task matches both queries.
+      const serviceTaskDocuments = new Map();
+
+      serviceTaskSnapshots.forEach((snapshot) => {
+        snapshot.docs.forEach((taskDocument) => {
+          serviceTaskDocuments.set(taskDocument.id, taskDocument);
+        });
+      });
+
+      // Preserve the optional custom parent-delete handler.
       if (typeof onDeleteAppointment === 'function') {
         await onDeleteAppointment(appointment);
-      } else {
-        await deleteDoc(doc(db, 'appointments', appointment.id));
       }
+
+      // Remove only queue tickets related to this parent appointment.
+      // The queue document itself is NEVER deleted.
+      // All unrelated tickets and queue data are preserved.
+      await runTransaction(db, async (transaction) => {
+        if (appointmentOffice === 'SWDS') {
+          const queueReference = doc(db, 'queues', 'SWDS');
+          const queueDocument = await transaction.get(queueReference);
+
+          if (queueDocument.exists()) {
+            const queueData = queueDocument.data();
+
+            const currentTickets = Array.isArray(queueData.tickets)
+              ? queueData.tickets
+              : [];
+
+            // Match using the parent appointment ID.
+            // This removes every service ticket belonging to this parent,
+            // without touching tickets belonging to other appointments.
+            const remainingTickets = currentTickets.filter((ticket) => {
+              const ticketAppointmentId = String(
+                ticket?.appointmentId || ''
+              ).trim();
+
+              return ticketAppointmentId !== appointmentId;
+            });
+
+            const ticketsWereRemoved =
+              remainingTickets.length !== currentTickets.length;
+
+            if (ticketsWereRemoved) {
+              const currentNowServing = String(
+                queueData.nowServing || ''
+              ).trim();
+
+              // Check whether the deleted appointment was currently being served.
+              const deletedNowServing = currentTickets.some((ticket) => {
+                const ticketAppointmentId = String(
+                  ticket?.appointmentId || ''
+                ).trim();
+
+                const ticketQueueNumber = String(
+                  ticket?.queueNumber || ''
+                ).trim();
+
+                return (
+                  ticketAppointmentId === appointmentId &&
+                  ticketQueueNumber === currentNowServing
+                );
+              });
+
+              let nextNowServing = currentNowServing;
+
+              if (deletedNowServing) {
+                const nextServingTicket = remainingTickets.find((ticket) => {
+                  const status = String(ticket?.status || '')
+                    .trim()
+                    .toLowerCase();
+
+                  return (
+                    status === 'in-progress' ||
+                    status === 'serving' ||
+                    status === 'now-serving'
+                  );
+                });
+
+                nextNowServing = nextServingTicket?.queueNumber || '';
+              }
+
+              // Update only the tickets array and nowServing.
+              // Do not delete queues/SWDS.
+              transaction.update(queueReference, {
+                tickets: remainingTickets,
+                nowServing: nextNowServing
+              });
+            }
+          }
+        }
+
+        // Delete the parent appointment unless the custom handler already does it.
+        if (typeof onDeleteAppointment !== 'function') {
+          transaction.delete(doc(db, 'appointments', appointmentId));
+        }
+      });
+
+      // Explicitly delete every related child service document.
+      // Firestore write batches support up to 500 writes, so use chunks of 450.
+      const serviceTaskReferences = Array.from(
+        serviceTaskDocuments.values()
+      ).map((taskDocument) => taskDocument.ref);
+
+      for (let i = 0; i < serviceTaskReferences.length; i += 450) {
+        const batch = writeBatch(db);
+        const currentBatch = serviceTaskReferences.slice(i, i + 450);
+
+        currentBatch.forEach((taskReference) => {
+          batch.delete(taskReference);
+        });
+
+        await batch.commit();
+      }
+
+      // Remove deleted tasks from the locally loaded staff-task list.
+      setAssignedServiceTasks((previousTasks) =>
+        previousTasks.filter((task) => {
+          const parentId = String(
+            task.parentAppointmentId || task.appointmentId || ''
+          ).trim();
+
+          return (
+            parentId !== appointmentId &&
+            !serviceTaskDocuments.has(task.id)
+          );
+        })
+      );
+
+      if (qrAppointment?.id === appointmentId) {
+        setQrAppointment(null);
+      }
+
+      setActionError('');
     } catch (error) {
-      console.error('Failed to delete appointment:', error);
+      console.error('Failed to delete appointment and related queue records:', error);
 
       setActionError(
-        error?.message || 'Unable to delete appointment.'
+        error?.message || 'Unable to delete appointment and its related records.'
       );
     } finally {
       setDeletingId(null);
