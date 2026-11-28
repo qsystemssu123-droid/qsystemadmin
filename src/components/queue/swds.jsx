@@ -1,3 +1,4 @@
+
 import {
   XCircle,
   AlertTriangle,
@@ -710,10 +711,13 @@ export default function Swds({
             officeName={officeName}
           />
 
+          {/* Future Appointments now use the same Postpone workflow as Upcoming Queue. */}
           <Future
             appointments={validAppointments}
             officeName={officeName}
             todayKey={todayKey}
+            onReject={openRejectModal}
+            processingId={processingId}
           />
         </div>
 

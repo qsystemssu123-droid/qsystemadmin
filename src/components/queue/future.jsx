@@ -9,6 +9,7 @@ import {
   AlertCircle,
   Flag,
   XCircle,
+  Loader2,
 } from "lucide-react";
 
 const PHILIPPINE_TIME_ZONE = "Asia/Manila";
@@ -532,7 +533,11 @@ export default function Future({
                           className="inline-flex items-center gap-1 text-rose-700 hover:text-rose-800 font-semibold text-xs bg-rose-50 hover:bg-rose-100 px-3 py-2 rounded-lg border border-rose-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                           title="Postpone with reason"
                         >
-                          <XCircle className="w-3.5 h-3.5" />
+                          {processingId === item.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <XCircle className="w-3.5 h-3.5" />
+                          )}
                           Postpone
                         </button>
                       </div>
